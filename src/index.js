@@ -5,12 +5,25 @@ import { z } from "zod";
 import { DomainError, createWorkbenchService } from "./domain/workbench-service.js";
 import { CANONICAL_UTC_TIMESTAMP_PATTERN } from "./domain/timestamps.js";
 import { startHttpServer } from "./http/server.js";
+import { createProbeAuthorizationService } from "./probe/authorization-service.js";
+import { createProbeChildRunner } from "./probe/child-runner.js";
+import { createLovartProbeService } from "./probe/probe-service.js";
+import { createProbeStore } from "./probe/probe-store.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const PLUGIN_VERSION = "0.1.0";
 const SCHEMA_VERSION = "1";
 const DEFAULT_HTTP_PORT = 4190;
+const authorizeProbeInput = z.object({
+  source: z.literal("user:current_session"),
+  reason: z.string().trim().min(1),
+  idempotency_key: z.string().trim().min(1),
+}).strict();
+const runProbeInput = z.object({
+  authorization_id: z.string().trim().min(1),
+  idempotency_key: z.string().trim().min(1),
+}).strict();
 
 function configuredPort() {
   const value = Number.parseInt(process.env.IMVIA_HTTP_PORT ?? "", 10);
@@ -68,10 +81,23 @@ function domainResponse(action) {
   };
 }
 
-export function createServer({ service: providedService, httpService = null } = {}) {
+function createProductionProbeService(stateDirectory) {
+  const probeStore = createProbeStore({ dataDirectory: stateDirectory });
+  const authorizationService = createProbeAuthorizationService({ store: probeStore });
+  const childRunner = createProbeChildRunner();
+  return createLovartProbeService({ authorizationService, runner: childRunner });
+}
+
+export function createServer({
+  service: providedService,
+  probeService: providedProbeService,
+  httpService = null,
+  dataDirectory: providedDataDirectory,
+} = {}) {
   const server = new McpServer({ name: "imvia-studio", version: PLUGIN_VERSION });
-  const stateDirectory = process.env.IMVIA_DATA_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), "../.imvia-studio-dev");
-  const service = providedService || createWorkbenchService({ dataDirectory: stateDirectory });
+  const stateDirectory = providedDataDirectory || process.env.IMVIA_DATA_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), "../.imvia-studio-dev");
+  const service = providedService ?? createWorkbenchService({ dataDirectory: stateDirectory });
+  const probeService = providedProbeService ?? createProductionProbeService(stateDirectory);
   server.registerTool(
     "imvia_health",
     {
@@ -80,6 +106,14 @@ export function createServer({ service: providedService, httpService = null } = 
     },
     async () => toMcpResponse(healthResponse(httpService)),
   );
+  server.registerTool("imvia_authorize_lovart_probe", {
+    description: "Record an explicit current-session authorization for one read-only Lovart capability probe. Does not contact Lovart.",
+    inputSchema: authorizeProbeInput,
+  }, domainResponse((input) => probeService.authorize(input)));
+  server.registerTool("imvia_probe_lovart_capabilities", {
+    description: "Consume one authorization for a fixed, read-only Lovart connectivity and workbench-capability probe.",
+    inputSchema: runProbeInput,
+  }, domainResponse((input) => probeService.probe(input)));
   server.registerTool("imvia_get_state", { description: "Read the current local IMVIA project and draft.", inputSchema: { include: z.array(z.enum(["jobs", "artifacts"])).optional() } }, domainResponse((input) => service.getState(input)));
   server.registerTool("imvia_get_account_status", {
     description: "Read the latest local account-capability cache without contacting Lovart.",
@@ -195,9 +229,10 @@ export function createServer({ service: providedService, httpService = null } = 
 export async function startServer() {
   const stateDirectory = process.env.IMVIA_DATA_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), "../.imvia-studio-dev");
   const service = createWorkbenchService({ dataDirectory: stateDirectory });
+  const probeService = createProductionProbeService(stateDirectory);
   const http = await startHttpServer({ service, port: configuredPort() });
   const httpService = { port: Number.parseInt(new URL(http.url).port, 10) };
-  const server = createServer({ service, httpService });
+  const server = createServer({ service, probeService, httpService, dataDirectory: stateDirectory });
   const closeHttp = () => http.close().catch(() => undefined);
   process.stdin.once("end", closeHttp);
   process.once("SIGINT", closeHttp);
