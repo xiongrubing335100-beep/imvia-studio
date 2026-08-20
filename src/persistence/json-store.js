@@ -8,10 +8,13 @@ function clone(value) {
 export class JsonStore {
   #queue = Promise.resolve();
 
-  constructor({ dataDirectory, createInitialState }) {
+  constructor({ dataDirectory, createInitialState, stateFileName = "state.json" }) {
+    if (path.basename(stateFileName) !== stateFileName || !stateFileName.endsWith(".json")) {
+      throw new TypeError("stateFileName must be a local .json filename");
+    }
     this.dataDirectory = dataDirectory;
     this.createInitialState = createInitialState;
-    this.statePath = path.join(dataDirectory, "state.json");
+    this.statePath = path.join(dataDirectory, stateFileName);
   }
 
   async read() {
