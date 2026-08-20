@@ -14,7 +14,7 @@
     "test:probe": "node --test test/json-store.test.mjs test/probe-*.test.mjs test/capability-normalizer.test.mjs test/mcp-probe.test.mjs",
     "test:mcp": "node --test test/mcp-health.test.mjs test/mcp-probe.test.mjs",
     "test:protection": "node --test test/protected-paths.test.mjs",
-    "verify:protected-paths": "node scripts/verify-protected-paths.mjs verify imvia-studio/test/protected-paths.manifest.json"
+    "verify:protected-paths": "node scripts/verify-protected-paths.mjs verify test/protected-paths.manifest.json"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
