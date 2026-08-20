@@ -227,6 +227,80 @@ for (const [label, suppliedCode, expectedCode, authenticated] of failureCases) {
   });
 }
 
+const hostileRunnerCodeCases = [
+  {
+    label: "object code whose string coercion matches the allowlist",
+    createError() {
+      const code = {
+        secret: "SECRET_OBJECT_CODE",
+        toString() {
+          return "AUTHENTICATION_FAILED";
+        },
+      };
+      return Object.assign(new Error("SECRET_OBJECT_FAILURE"), { code });
+    },
+  },
+  {
+    label: "code getter that throws",
+    createError() {
+      const error = new Error("SECRET_GETTER_FAILURE");
+      Object.defineProperty(error, "code", {
+        get() {
+          throw new Error("SECRET_CODE_GETTER");
+        },
+      });
+      return error;
+    },
+  },
+];
+
+for (const { label, createError } of hostileRunnerCodeCases) {
+  test(`${label} is safely reduced and still records the claimed failure`, async () => {
+    const fixture = await serviceFixture();
+    const authorization = await fixture.authorizationService.authorize(validAuthorizationInput);
+    const failureInputs = [];
+    let childRuns = 0;
+    const authorizationService = {
+      authorize: (input) => fixture.authorizationService.authorize(input),
+      beginProbe: (input) => fixture.authorizationService.beginProbe(input),
+      completeProbe: (input) => fixture.authorizationService.completeProbe(input),
+      async failProbe(input) {
+        failureInputs.push(input);
+        return fixture.authorizationService.failProbe(input);
+      },
+    };
+    const service = createLovartProbeService({
+      authorizationService,
+      runner: {
+        async run() {
+          childRuns += 1;
+          throw createError();
+        },
+      },
+      platform: "darwin",
+    });
+    const input = { authorization_id: authorization.authorization_id, idempotency_key: "probe-1" };
+
+    await assert.rejects(service.probe(input), (error) => {
+      assertStableFailure(error, "UPSTREAM_UNREACHABLE", null);
+      assert.equal(JSON.stringify({
+        code: error.code,
+        message: error.message,
+        details: error.details,
+        cause: error.cause,
+      }).includes("SECRET"), false);
+      return true;
+    });
+    await assert.rejects(service.probe(input), (error) => error.code === "PROBE_AUTHORIZATION_INVALID");
+
+    assert.equal(childRuns, 1);
+    assert.deepEqual(failureInputs, [{ attempt_id: "generated-2", code: "UPSTREAM_UNREACHABLE" }]);
+    const state = await fixture.store.read();
+    assert.equal(state.attempts[0].status, "failed");
+    assert.equal(state.attempts[0].error_code, "UPSTREAM_UNREACHABLE");
+  });
+}
+
 test("successful replay performs no second child run", async () => {
   const fixture = await serviceFixture();
   const authorization = await fixture.service.authorize(validAuthorizationInput);
@@ -311,6 +385,50 @@ test("final-store failure consumes the attempt and never reruns the child", asyn
   assert.equal(state.attempts[0].error_code, "STORE_UNAVAILABLE");
   assert.notEqual(state.authorizations[0].consumed_at, null);
 });
+
+for (const nativeCode of ["ENOSPC", "EACCES"]) {
+  test(`native ${nativeCode} final-store failure maps to store unavailable without rerunning`, async () => {
+    const fixture = await serviceFixture();
+    const authorization = await fixture.authorizationService.authorize(validAuthorizationInput);
+    const failureInputs = [];
+    let childRuns = 0;
+    let completionCalls = 0;
+    const authorizationService = {
+      authorize: (input) => fixture.authorizationService.authorize(input),
+      beginProbe: (input) => fixture.authorizationService.beginProbe(input),
+      async completeProbe() {
+        completionCalls += 1;
+        throw Object.assign(new Error(`SECRET_${nativeCode}_STORE_FAILURE`), { code: nativeCode });
+      },
+      async failProbe(input) {
+        failureInputs.push(input);
+        return fixture.authorizationService.failProbe(input);
+      },
+    };
+    const service = createLovartProbeService({
+      authorizationService,
+      runner: { async run() { childRuns += 1; return sampleSummary; } },
+      platform: "darwin",
+    });
+    const input = { authorization_id: authorization.authorization_id, idempotency_key: "probe-1" };
+
+    await assert.rejects(service.probe(input), (error) => {
+      assertStableFailure(error, "STORE_UNAVAILABLE", null);
+      assert.equal(error.message.includes("SECRET"), false);
+      assert.equal(error.message.includes(nativeCode), false);
+      return true;
+    });
+    await assert.rejects(service.probe(input), (error) => error.code === "PROBE_AUTHORIZATION_INVALID");
+
+    assert.equal(childRuns, 1);
+    assert.equal(completionCalls, 1);
+    assert.deepEqual(failureInputs, [{ attempt_id: "generated-2", code: "STORE_UNAVAILABLE" }]);
+    const state = await fixture.store.read();
+    assert.equal(state.attempts[0].status, "failed");
+    assert.equal(state.attempts[0].error_code, "STORE_UNAVAILABLE");
+    assert.notEqual(state.authorizations[0].consumed_at, null);
+  });
+}
 
 test("failProbe failure cannot replace or leak the original stable semantics", async () => {
   const fixture = await serviceFixture();

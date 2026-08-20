@@ -11,8 +11,28 @@ const FAILURE_MESSAGES = Object.freeze({
   STORE_UNAVAILABLE: "Lovart probe state is unavailable",
 });
 
-function stableProbeCode(code) {
-  return Object.hasOwn(FAILURE_MESSAGES, code) ? code : "UPSTREAM_UNREACHABLE";
+function stableProbeCode(error, fallbackCode) {
+  let code;
+  try {
+    code = error?.code;
+  } catch {
+    return fallbackCode;
+  }
+  return typeof code === "string" && Object.hasOwn(FAILURE_MESSAGES, code)
+    ? code
+    : fallbackCode;
+}
+
+async function throwStableProbeFailure({ authorizationService, attemptId, error, fallbackCode }) {
+  const code = stableProbeCode(error, fallbackCode);
+  try {
+    await authorizationService.failProbe({ attempt_id: attemptId, code });
+  } catch {
+    // Claim consumption remains authoritative even if recording the failure is unavailable.
+  }
+  throw new DomainError(code, FAILURE_MESSAGES[code], {
+    authenticated: code === "AUTHENTICATION_FAILED" ? false : null,
+  });
 }
 
 export function createLovartProbeService({ authorizationService, runner, platform = process.platform }) {
@@ -31,18 +51,26 @@ export function createLovartProbeService({ authorizationService, runner, platfor
       const claim = await authorizationService.beginProbe(input);
       if (claim.kind === "replay") return claim.result;
 
+      let result;
       try {
-        const result = await runner.run();
+        result = await runner.run();
+      } catch (error) {
+        await throwStableProbeFailure({
+          authorizationService,
+          attemptId: claim.attempt_id,
+          error,
+          fallbackCode: "UPSTREAM_UNREACHABLE",
+        });
+      }
+
+      try {
         return await authorizationService.completeProbe({ attempt_id: claim.attempt_id, result });
       } catch (error) {
-        const code = stableProbeCode(error?.code);
-        try {
-          await authorizationService.failProbe({ attempt_id: claim.attempt_id, code });
-        } catch {
-          // Claim consumption remains authoritative even if recording the failure is unavailable.
-        }
-        throw new DomainError(code, FAILURE_MESSAGES[code], {
-          authenticated: code === "AUTHENTICATION_FAILED" ? false : null,
+        await throwStableProbeFailure({
+          authorizationService,
+          attemptId: claim.attempt_id,
+          error,
+          fallbackCode: "STORE_UNAVAILABLE",
         });
       }
     },
