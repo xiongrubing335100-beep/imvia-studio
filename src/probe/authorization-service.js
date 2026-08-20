@@ -102,10 +102,11 @@ export function createProbeAuthorizationService({ store, now = Date.now, randomI
         if (replay?.status === "completed") return { kind: "replay", result: replay.result };
         if (replay) throw new DomainError("PROBE_AUTHORIZATION_INVALID", "probe attempt is already consumed");
         const authorization = state.authorizations.find((record) => record.id === authorizationId);
-        if (!authorization || authorization.consumed_at || Date.parse(authorization.expires_at) <= now()) {
+        const claimedAtMs = now();
+        if (!authorization || authorization.consumed_at || Date.parse(authorization.expires_at) <= claimedAtMs) {
           throw new DomainError("PROBE_AUTHORIZATION_INVALID", "authorization is missing, expired, or consumed");
         }
-        const claimedAt = new Date(now()).toISOString();
+        const claimedAt = new Date(claimedAtMs).toISOString();
         authorization.consumed_at = claimedAt;
         const attempt = {
           id: randomId(), authorization_id: authorizationId, idempotency_key: idempotencyKey,

@@ -143,6 +143,30 @@ test("authorization expires at the TTL boundary without creating an attempt", as
   assert.equal(state.attempts.length, 0);
 });
 
+test("claim captures one clock snapshot before the authorization expiry boundary", async () => {
+  const { service: setupService, store } = await fixture({ enabled: true });
+  const authorization = await setupService.authorize(validAuthorizationInput);
+  const expiresAtMs = START_MS + PROBE_AUTHORIZATION_TTL_MS;
+  let clockReads = 0;
+  const service = createProbeAuthorizationService({
+    store,
+    now: () => clockReads++ === 0 ? expiresAtMs - 1 : expiresAtMs,
+    randomId: () => "boundary-attempt",
+  });
+
+  const claim = await service.beginProbe({
+    authorization_id: authorization.authorization_id,
+    idempotency_key: "probe-boundary",
+  });
+
+  assert.deepEqual(claim, { kind: "claimed", attempt_id: "boundary-attempt" });
+  assert.equal(clockReads, 1);
+  const state = await store.read();
+  assert.equal(state.authorizations[0].consumed_at, "2026-08-20T00:01:59.999Z");
+  assert.equal(state.attempts[0].started_at, "2026-08-20T00:01:59.999Z");
+  assert.ok(Date.parse(state.attempts[0].started_at) < Date.parse(state.authorizations[0].expires_at));
+});
+
 test("concurrent claims have exactly one winner and one durable pending attempt", async () => {
   const { service, store, setNow } = await fixture({ enabled: true });
   const authorization = await service.authorize(validAuthorizationInput);
