@@ -103,6 +103,26 @@ function closeChild(child, { stdout = successEnvelope, stderr = "", code = 0, si
   child.emit("close", code, signal);
 }
 
+function installTimerHarness(t) {
+  const timers = [];
+  const cleared = [];
+  t.mock.method(globalThis, "setTimeout", (callback, delay) => {
+    const handle = { callback, delay };
+    timers.push(handle);
+    return handle;
+  });
+  t.mock.method(globalThis, "clearTimeout", (handle) => {
+    cleared.push(handle);
+  });
+  return {
+    cleared,
+    fire(handle) {
+      handle.callback();
+    },
+    timers,
+  };
+}
+
 test("Keychain provider performs two sequential fixed shell-free lookups", async () => {
   const fake = createSecurityFake([
     { stdout: `${ACCESS_MARKER}\n` },
@@ -116,14 +136,91 @@ test("Keychain provider performs two sequential fixed shell-free lookups", async
     {
       file: "/usr/bin/security",
       args: ["find-generic-password", "-s", "ai.imvia.studio.lovart-readonly", "-a", "access-key", "-w"],
-      options: { encoding: "utf8", maxBuffer: 4096, shell: false },
+      options: {
+        encoding: "utf8",
+        killSignal: "SIGKILL",
+        maxBuffer: 4096,
+        shell: false,
+        timeout: 15_000,
+      },
     },
     {
       file: "/usr/bin/security",
       args: ["find-generic-password", "-s", "ai.imvia.studio.lovart-readonly", "-a", "secret-key", "-w"],
-      options: { encoding: "utf8", maxBuffer: 4096, shell: false },
+      options: {
+        encoding: "utf8",
+        killSignal: "SIGKILL",
+        maxBuffer: 4096,
+        shell: false,
+        timeout: 15_000,
+      },
     },
   ]);
+});
+
+test("a never-callback Keychain lookup is killed at 15 seconds with a redacted failure", async (t) => {
+  const timer = installTimerHarness(t);
+  const calls = [];
+  const killCalls = [];
+  const execFile = (file, args, options) => {
+    calls.push({ file, args, options });
+    return {
+      kill(signal) {
+        killCalls.push(signal);
+        return true;
+      },
+    };
+  };
+  const outcome = readProbeCredentials({ execFile, platform: "darwin" });
+
+  assert.equal(timer.timers.length, 1);
+  assert.equal(timer.timers[0].delay, 15_000);
+  assert.deepEqual(calls[0].options, {
+    encoding: "utf8",
+    killSignal: "SIGKILL",
+    maxBuffer: 4096,
+    shell: false,
+    timeout: 15_000,
+  });
+  timer.fire(timer.timers[0]);
+  await assert.rejects(
+    outcome,
+    (error) => assertRedactedFailure(error, "CREDENTIAL_REFERENCE_UNAVAILABLE"),
+  );
+  assert.equal(calls.length, 1);
+  assert.deepEqual(killCalls, ["SIGKILL"]);
+  assert.deepEqual(timer.cleared, [timer.timers[0]]);
+});
+
+test("Keychain lookup watchdogs clear once on callback success, failure, and synchronous throw", async (t) => {
+  const timer = installTimerHarness(t);
+  const success = createSecurityFake([
+    { stdout: `${ACCESS_MARKER}\n` },
+    { stdout: `${SECRET_MARKER}\n` },
+  ]);
+  await readProbeCredentials({ execFile: success.execFile, platform: "darwin" });
+
+  const callbackFailure = createSecurityFake([{
+    error: new Error(`${ACCESS_MARKER} callback failure`),
+    stderr: SECRET_MARKER,
+  }]);
+  await assert.rejects(
+    readProbeCredentials({ execFile: callbackFailure.execFile, platform: "darwin" }),
+    (error) => assertRedactedFailure(error, "CREDENTIAL_REFERENCE_UNAVAILABLE"),
+  );
+
+  const synchronousFailure = createSecurityFake([{
+    throws: new Error(`${RAW_MARKER} synchronous failure`),
+  }]);
+  await assert.rejects(
+    readProbeCredentials({ execFile: synchronousFailure.execFile, platform: "darwin" }),
+    (error) => assertRedactedFailure(error, "CREDENTIAL_REFERENCE_UNAVAILABLE"),
+  );
+
+  assert.equal(timer.timers.length, 4);
+  assert.deepEqual(timer.timers.map(({ delay }) => delay), [15_000, 15_000, 15_000, 15_000]);
+  for (const handle of timer.timers)
+    assert.equal(timer.cleared.filter((cleared) => cleared === handle).length, 1);
 });
 
 test("non-darwin credential lookup fails before invoking the Keychain command", async () => {
@@ -243,6 +340,71 @@ test("runner starts only the absolute fixed child path with a minimal environmen
   } finally {
     if (previous === undefined) delete process.env.ACCESS_MARKER;
     else process.env.ACCESS_MARKER = previous;
+  }
+});
+
+test("a never-closing child is killed by the fixed 40-second watchdog", async (t) => {
+  const timer = installTimerHarness(t);
+  const fake = createSpawnFake(() => {});
+  const runner = createProbeChildRunner({
+    nodePath: "/fixed/node",
+    childPath: "/fixed/probe-child.js",
+    spawnProcess: fake.spawnProcess,
+  });
+  const outcome = runner.run();
+
+  assert.equal(timer.timers.length, 1);
+  assert.equal(timer.timers[0].delay, 40_000);
+  timer.fire(timer.timers[0]);
+  await assert.rejects(outcome, (error) => assertRedactedFailure(error));
+  assert.deepEqual(fake.children[0].killCalls, ["SIGKILL"]);
+  assert.deepEqual(timer.cleared, [timer.timers[0]]);
+});
+
+test("runner clears its one watchdog on every settlement family", async (t) => {
+  const timer = installTimerHarness(t);
+  const cases = [
+    {
+      scenario: (child) => closeChild(child),
+      verify: async (outcome) => assert.deepEqual(await outcome, validSummary),
+    },
+    {
+      scenario: (child) => closeChild(child, {
+        stdout: JSON.stringify({
+          ok: false,
+          error: { code: "AUTHENTICATION_FAILED", message: "Lovart authentication was rejected" },
+        }),
+      }),
+      verify: async (outcome) => assert.rejects(
+        outcome,
+        (error) => assertRedactedFailure(error, "AUTHENTICATION_FAILED"),
+      ),
+    },
+    {
+      scenario: { spawnThrows: new Error(`${ACCESS_MARKER} spawn throw`) },
+      verify: async (outcome) => assert.rejects(outcome, (error) => assertRedactedFailure(error)),
+    },
+    {
+      scenario: (child) => closeChild(child, { code: 7 }),
+      verify: async (outcome) => assert.rejects(outcome, (error) => assertRedactedFailure(error)),
+    },
+    {
+      scenario: (child) => child.stdout.emit("error", new Error(RAW_MARKER)),
+      verify: async (outcome) => assert.rejects(outcome, (error) => assertRedactedFailure(error)),
+    },
+  ];
+
+  for (const entry of cases) {
+    const timerIndex = timer.timers.length;
+    const fake = createSpawnFake(entry.scenario);
+    const runner = createProbeChildRunner({
+      nodePath: "/fixed/node",
+      childPath: "/fixed/child.js",
+      spawnProcess: fake.spawnProcess,
+    });
+    await entry.verify(runner.run());
+    assert.equal(timer.timers[timerIndex].delay, 40_000);
+    assert.equal(timer.cleared.filter((handle) => handle === timer.timers[timerIndex]).length, 1);
   }
 });
 
@@ -392,6 +554,52 @@ test("runner maps spawn, stream, exit, and signal races to one redacted failure"
     });
     await assert.rejects(runner.run(), (error) => assertRedactedFailure(error));
   }
+});
+
+test("stream and child errors without close kill once and absorb repeated late errors", async () => {
+  for (const source of ["stdout", "stderr", "child"]) {
+    const fake = createSpawnFake((child) => {
+      const emitter = source === "child" ? child : child[source];
+      emitter.emit("error", new Error(`${RAW_MARKER} first ${source} error`));
+    });
+    const runner = createProbeChildRunner({
+      nodePath: "/fixed/node",
+      childPath: "/fixed/child.js",
+      spawnProcess: fake.spawnProcess,
+    });
+
+    await assert.rejects(runner.run(), (error) => assertRedactedFailure(error));
+    assert.deepEqual(fake.children[0].killCalls, ["SIGKILL"]);
+    assert.doesNotThrow(() => {
+      fake.children[0].stdout.emit("error", new Error(`${ACCESS_MARKER} late stdout one`));
+      fake.children[0].stdout.emit("error", new Error(`${ACCESS_MARKER} late stdout two`));
+      fake.children[0].stderr.emit("error", new Error(`${SECRET_MARKER} late stderr one`));
+      fake.children[0].stderr.emit("error", new Error(`${SECRET_MARKER} late stderr two`));
+      fake.children[0].emit("error", new Error(`${RAW_MARKER} late child one`));
+      fake.children[0].emit("error", new Error(`${RAW_MARKER} late child two`));
+    });
+    assert.deepEqual(fake.children[0].killCalls, ["SIGKILL"]);
+  }
+});
+
+test("repeated errors after successful close remain absorbed and cannot change the result", async () => {
+  const fake = createSpawnFake((child) => closeChild(child));
+  const runner = createProbeChildRunner({
+    nodePath: "/fixed/node",
+    childPath: "/fixed/child.js",
+    spawnProcess: fake.spawnProcess,
+  });
+  const result = await runner.run();
+
+  assert.deepEqual(result, validSummary);
+  assert.doesNotThrow(() => {
+    for (let index = 0; index < 2; index += 1) {
+      fake.children[0].stdout.emit("error", new Error(`${ACCESS_MARKER} late stdout`));
+      fake.children[0].stderr.emit("error", new Error(`${SECRET_MARKER} late stderr`));
+      fake.children[0].emit("error", new Error(`${RAW_MARKER} late child`));
+    }
+  });
+  assert.deepEqual(fake.children[0].killCalls, []);
 });
 
 test("child executable and runner contain no user argument or inherited environment path", async () => {

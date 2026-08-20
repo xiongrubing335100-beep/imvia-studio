@@ -7,6 +7,7 @@ import { MODEL_CAPABILITIES } from "../domain/model-capabilities.js";
 import { PROBE_POLICY_VERSION, PROBE_RESULT_TTL_MS } from "./constants.js";
 
 const DEFAULT_CHILD_PATH = fileURLToPath(new URL("./child.js", import.meta.url));
+const CHILD_TIMEOUT_MS = 40_000;
 const MAX_STDOUT_BYTES = 65_536;
 const MAX_STDERR_BYTES = 4_096;
 const CANONICAL_UTC = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{3}Z$/;
@@ -116,24 +117,31 @@ export function createProbeChildRunner({
         let stdoutBytes = 0;
         let stderrBytes = 0;
         const stdout = [];
+        let watchdog;
 
-        const rejectRedacted = () => {
-          if (settled) return;
-          settled = true;
-          reject(stableFailure());
+        const clearWatchdog = () => {
+          if (watchdog === undefined) return;
+          clearTimeout(watchdog);
+          watchdog = undefined;
         };
-        const killAndReject = () => {
+        const settleRejected = (code = "UPSTREAM_UNREACHABLE", kill = false) => {
           if (settled) return;
           settled = true;
-          try {
-            child?.kill("SIGKILL");
-          } catch {
-            // The public outcome is the same if an already-failed child cannot be killed.
+          clearWatchdog();
+          if (kill) {
+            try {
+              child?.kill("SIGKILL");
+            } catch {
+              // The public outcome is the same if an already-failed child cannot be killed.
+            }
           }
-          reject(stableFailure());
+          reject(stableFailure(code));
         };
+        const rejectRedacted = () => settleRejected();
+        const killAndReject = () => settleRejected("UPSTREAM_UNREACHABLE", true);
 
         try {
+          watchdog = setTimeout(killAndReject, CHILD_TIMEOUT_MS);
           child = spawnProcess(nodePath, [childPath], {
             shell: false,
             env: { LANG: "C", LC_ALL: "C" },
@@ -165,9 +173,9 @@ export function createProbeChildRunner({
           stderrBytes += bytes.byteLength;
           if (stderrBytes > MAX_STDERR_BYTES) killAndReject();
         });
-        child.stdout.once("error", rejectRedacted);
-        child.stderr.once("error", rejectRedacted);
-        child.once("error", rejectRedacted);
+        child.stdout.on("error", killAndReject);
+        child.stderr.on("error", killAndReject);
+        child.on("error", killAndReject);
         child.once("close", (code, signal) => {
           if (settled) return;
           if (code !== 0 || signal !== null || stderrBytes !== 0) {
@@ -182,11 +190,11 @@ export function createProbeChildRunner({
             return;
           }
           if (parsed.kind === "error") {
-            settled = true;
-            reject(stableFailure(parsed.code));
+            settleRejected(parsed.code);
             return;
           }
           settled = true;
+          clearWatchdog();
           resolve(parsed.result);
         });
       });

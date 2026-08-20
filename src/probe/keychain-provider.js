@@ -8,7 +8,14 @@ import {
 } from "./constants.js";
 
 const SECURITY_PATH = "/usr/bin/security";
-const EXEC_OPTIONS = Object.freeze({ encoding: "utf8", maxBuffer: 4096, shell: false });
+const KEYCHAIN_TIMEOUT_MS = 15_000;
+const EXEC_OPTIONS = Object.freeze({
+  encoding: "utf8",
+  killSignal: "SIGKILL",
+  maxBuffer: 4096,
+  shell: false,
+  timeout: KEYCHAIN_TIMEOUT_MS,
+});
 
 function credentialFailure() {
   return new DomainError(
@@ -27,22 +34,40 @@ function readAccount(execFile, account) {
     "-w",
   ];
   return new Promise((resolve, reject) => {
-    execFile(SECURITY_PATH, args, EXEC_OPTIONS, (error, stdout) => {
+    let child;
+    let settled = false;
+    let watchdog;
+    const finish = (error, value, kill = false) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(watchdog);
+      if (kill) {
+        try {
+          child?.kill("SIGKILL");
+        } catch {
+          // The public outcome is the same if a timed-out lookup cannot be killed.
+        }
+      }
       if (error) {
         reject(credentialFailure());
         return;
       }
-      if (typeof stdout !== "string") {
-        reject(credentialFailure());
-        return;
-      }
-      const value = stdout.replace(/(?:\r\n|\n)$/, "");
-      if (value.length === 0) {
-        reject(credentialFailure());
-        return;
-      }
       resolve(value);
-    });
+    };
+
+    try {
+      watchdog = setTimeout(() => finish(true, undefined, true), KEYCHAIN_TIMEOUT_MS);
+      child = execFile(SECURITY_PATH, args, EXEC_OPTIONS, (error, stdout) => {
+        if (error || typeof stdout !== "string") {
+          finish(true);
+          return;
+        }
+        const value = stdout.replace(/(?:\r\n|\n)$/, "");
+        finish(value.length === 0, value);
+      });
+    } catch {
+      finish(true);
+    }
   });
 }
 
