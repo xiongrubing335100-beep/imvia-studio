@@ -1,0 +1,17 @@
+export const MODEL_CAPABILITIES = new Map([
+  ["Seedance 2.5", { mode: "video", durations: [5, 10, 15, 30] }],
+  ["Seedance 2.0 VIP", { mode: "video", durations: [5, 10, 15] }],
+  ["Seedance 2.0 Fast", { mode: "video", durations: [5, 10, 15] }],
+  ["Minimax H3", { mode: "video", durations: [5, 10, 15] }],
+  ["Kling 3.0", { mode: "video", durations: [5, 10, 15] }],
+  ["Kling 3.0 Omni", { mode: "video", durations: [5, 10, 15] }],
+  ["Seedream 4.0", { mode: "image" }],
+  ["Seedream 3.0", { mode: "image" }],
+  ["Seedream 3.0 Fast", { mode: "image" }],
+  ["Image 2", { mode: "image" }],
+  ["Nano Banana Pro", { mode: "image" }],
+  ["Nano Banana 2", { mode: "image" }],
+  ["Seedream 5.0", { mode: "image" }],
+  ["Seedream 5.0 Lite", { mode: "image" }],
+  ["Midjourney", { mode: "image" }],
+]);
