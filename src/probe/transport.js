@@ -64,7 +64,8 @@ function isTlsFailure(error) {
   const code = typeof error?.code === "string" ? error.code.toUpperCase() : "";
   return TLS_VERIFICATION_ERROR_CODES.has(code)
     || code.startsWith("ERR_SSL_")
-    || code.startsWith("ERR_TLS_");
+    || code.startsWith("ERR_TLS_")
+    || code.startsWith("UNABLE_TO_");
 }
 
 function mapRequestFailure(error) {

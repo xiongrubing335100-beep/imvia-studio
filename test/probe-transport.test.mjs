@@ -310,6 +310,8 @@ for (const tlsCode of [
   "PATH_LENGTH_EXCEEDED",
   "CRL_HAS_EXPIRED",
   "ERROR_IN_CERT_NOT_AFTER_FIELD",
+  "UNABLE_TO_GET_CRL_ISSUER",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
 ]) {
   test(`${tlsCode} maps to a redacted TLS security failure`, async () => {
     const error = Object.assign(new Error(`TLS marker-upstream ${tlsCode}`), { code: tlsCode });
