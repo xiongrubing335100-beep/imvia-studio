@@ -15,13 +15,26 @@ function createHttpsHarness(scenarios) {
       body: "",
       destroyed: false,
       destroyError: null,
+      destroyCalls: 0,
+      endCalls: 0,
+      onceEvents: [],
+      writeCalls: 0,
     };
     calls.push(call);
 
+    const emitterOnce = requestEmitter.once.bind(requestEmitter);
+    requestEmitter.once = (event, listener) => {
+      call.onceEvents.push(event);
+      return emitterOnce(event, listener);
+    };
     requestEmitter.write = (chunk) => {
+      call.writeCalls += 1;
+      if (scenario?.type === "write-throw") throw scenario.error;
       call.body += String(chunk);
     };
     requestEmitter.end = () => {
+      call.endCalls += 1;
+      if (scenario?.type === "end-throw") throw scenario.error;
       if (scenario?.type === "pending") return;
       if (scenario?.type === "request-error") {
         queueMicrotask(() => requestEmitter.emit("error", scenario.error));
@@ -38,21 +51,56 @@ function createHttpsHarness(scenarios) {
         };
         onResponse(response);
 
+        if (scenario?.type === "response-error") {
+          response.emit("error", scenario.error);
+          response.emit("end");
+          return;
+        }
+        if (scenario?.type === "response-aborted") {
+          response.emit("aborted");
+          response.emit("end");
+          return;
+        }
         for (const chunk of scenario?.chunks ?? [scenario?.body ?? "{}"])
           response.emit("data", chunk);
         response.emit("end");
       });
     };
     requestEmitter.destroy = (error) => {
+      call.destroyCalls += 1;
       call.destroyed = true;
       call.destroyError = error;
-      requestEmitter.emit("error", error);
+      if (error) requestEmitter.emit("error", error);
     };
 
     return requestEmitter;
   }
 
   return { calls, request };
+}
+
+function installTimerHarness(t) {
+  const timers = [];
+  const cleared = [];
+  t.mock.method(globalThis, "setTimeout", (callback, delay) => {
+    const handle = { callback, delay };
+    timers.push(handle);
+    return handle;
+  });
+  t.mock.method(globalThis, "clearTimeout", (handle) => {
+    cleared.push(handle);
+  });
+  return {
+    assertSingleFixedTimerCleared() {
+      assert.equal(timers.length, 1);
+      assert.equal(timers[0].delay, 8_000);
+      assert.deepEqual(cleared, [timers[0]]);
+    },
+    fire() {
+      assert.equal(timers.length, 1);
+      timers[0].callback();
+    },
+  };
 }
 
 function assertRedacted(error, markers = []) {
@@ -108,6 +156,7 @@ test("transport performs exactly one fixed signed request", async () => {
     protocol: "https:",
     hostname: "lgw.lovart.ai",
     port: 443,
+    agent: false,
     method: "POST",
     path: "/v1/openapi/mode/query",
     rejectUnauthorized: true,
@@ -147,7 +196,7 @@ test("proxy environment variables cannot change the fixed direct request", async
     });
     assert.equal(fake.calls.length, 1);
     assert.equal("proxy" in fake.calls[0].options, false);
-    assert.equal("agent" in fake.calls[0].options, false);
+    assert.equal(fake.calls[0].options.agent, false);
     assert.equal(JSON.stringify(fake.calls[0].options).includes("marker-proxy"), false);
   } finally {
     for (const [name, value] of Object.entries(previous)) {
@@ -253,7 +302,15 @@ test("DNS and connection errors map to redacted upstream-unreachable failures", 
   });
 });
 
-for (const tlsCode of ["CERT_HAS_EXPIRED", "ERR_TLS_CERT_ALTNAME_INVALID"]) {
+for (const tlsCode of [
+  "CERT_HAS_EXPIRED",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "INVALID_CA",
+  "INVALID_PURPOSE",
+  "PATH_LENGTH_EXCEEDED",
+  "CRL_HAS_EXPIRED",
+  "ERROR_IN_CERT_NOT_AFTER_FIELD",
+]) {
   test(`${tlsCode} maps to a redacted TLS security failure`, async () => {
     const error = Object.assign(new Error(`TLS marker-upstream ${tlsCode}`), { code: tlsCode });
     await assertFailure({
@@ -263,6 +320,208 @@ for (const tlsCode of ["CERT_HAS_EXPIRED", "ERR_TLS_CERT_ALTNAME_INVALID"]) {
     });
   });
 }
+
+for (const networkCode of ["ENOTFOUND", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT"]) {
+  test(`${networkCode} remains an ordinary upstream-unreachable failure`, async () => {
+    const error = Object.assign(new Error(`network marker ${networkCode}`), { code: networkCode });
+    await assertFailure({
+      scenario: { type: "request-error", error },
+      code: "UPSTREAM_UNREACHABLE",
+      markers: [networkCode, "network marker"],
+    });
+  });
+}
+
+for (const [label, scenario, expectedCode] of [
+  ["success", { statusCode: 200, body: "{}" }, null],
+  ["status error", { statusCode: 429, body: "ignored" }, "UPSTREAM_RATE_LIMITED"],
+  ["response error", {
+    type: "response-error",
+    statusCode: 200,
+    error: Object.assign(new Error("marker response reset"), { code: "ECONNRESET" }),
+  }, "UPSTREAM_UNREACHABLE"],
+  ["request error", {
+    type: "request-error",
+    error: Object.assign(new Error("marker request reset"), { code: "ECONNRESET" }),
+  }, "UPSTREAM_UNREACHABLE"],
+  ["response abort", { type: "response-aborted", statusCode: 200 }, "UPSTREAM_UNREACHABLE"],
+  ["overflow", { statusCode: 200, chunks: [Buffer.alloc(65_537)] }, "UPSTREAM_SCHEMA_UNRECOGNIZED"],
+]) {
+  test(`${label} clears its one fixed wall-clock timer`, async (t) => {
+    const timer = installTimerHarness(t);
+    const fake = createHttpsHarness([scenario]);
+    const outcome = requestLovartModeQuery({
+      accessKey: "a",
+      secretKey: "s",
+      requestImpl: fake.request,
+    });
+    if (expectedCode) await assert.rejects(outcome, (error) => error.code === expectedCode);
+    else await outcome;
+    timer.assertSingleFixedTimerCleared();
+    assert.equal(fake.calls.length, 1);
+  });
+}
+
+test("a fired timeout clears its timer while destroying one request", async (t) => {
+  const timer = installTimerHarness(t);
+  const fake = createHttpsHarness([{ type: "pending" }]);
+  const outcome = requestLovartModeQuery({
+    accessKey: "a",
+    secretKey: "s",
+    requestImpl: fake.request,
+  });
+  timer.fire();
+  await assert.rejects(outcome, (error) => error.code === "UPSTREAM_UNREACHABLE");
+  timer.assertSingleFixedTimerCleared();
+  assert.equal(fake.calls.length, 1);
+  assert.equal(fake.calls[0].destroyCalls, 1);
+});
+
+test("a synchronous requestImpl throw is redacted and clears the fixed timer", async (t) => {
+  const timer = installTimerHarness(t);
+  let calls = 0;
+  await assert.rejects(
+    requestLovartModeQuery({
+      accessKey: "marker-access",
+      secretKey: "marker-secret",
+      requestImpl: () => {
+        calls += 1;
+        throw Object.assign(new Error("marker-access marker-secret sync request"), { code: "ENOTFOUND" });
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, "UPSTREAM_UNREACHABLE");
+      assertRedacted(error, ["marker-access", "marker-secret", "sync request"]);
+      return true;
+    },
+  );
+  assert.equal(calls, 1);
+  timer.assertSingleFixedTimerCleared();
+});
+
+for (const type of ["write-throw", "end-throw"]) {
+  test(`a synchronous ${type} failure is redacted, destroyed, and clears the timer`, async (t) => {
+    const timer = installTimerHarness(t);
+    const fake = createHttpsHarness([{
+      type,
+      error: Object.assign(new Error(`marker-access marker-secret ${type}`), { code: "ECONNRESET" }),
+    }]);
+    await assert.rejects(
+      requestLovartModeQuery({
+        accessKey: "marker-access",
+        secretKey: "marker-secret",
+        requestImpl: fake.request,
+      }),
+      (error) => {
+        assert.equal(error.code, "UPSTREAM_UNREACHABLE");
+        assertRedacted(error, ["marker-access", "marker-secret", type]);
+        return true;
+      },
+    );
+    assert.equal(fake.calls.length, 1);
+    assert.equal(fake.calls[0].destroyCalls, 1);
+    timer.assertSingleFixedTimerCleared();
+  });
+}
+
+for (const [type, event] of [["response-error", "error"], ["response-aborted", "aborted"]]) {
+  test(`a response ${event} settles once, destroys both streams, and clears the timer`, async (t) => {
+    const timer = installTimerHarness(t);
+    const fake = createHttpsHarness([{
+      type,
+      statusCode: 200,
+      error: Object.assign(new Error("marker response failure"), { code: "ECONNRESET" }),
+    }]);
+    let settlements = 0;
+    const outcome = requestLovartModeQuery({
+      accessKey: "a",
+      secretKey: "s",
+      requestImpl: fake.request,
+    });
+    outcome.then(() => { settlements += 1; }, () => { settlements += 1; });
+    await assert.rejects(outcome, (error) => error.code === "UPSTREAM_UNREACHABLE");
+    await Promise.resolve();
+    assert.equal(settlements, 1);
+    assert.equal(fake.calls.length, 1);
+    assert.equal(fake.calls[0].destroyCalls, 1);
+    assert.equal(fake.calls[0].responseDestroyed, true);
+    timer.assertSingleFixedTimerCleared();
+  });
+}
+
+test("synchronous response settlement skips request listeners, write, and end", async (t) => {
+  const timer = installTimerHarness(t);
+  const response = new EventEmitter();
+  response.statusCode = 200;
+  let responseDestroyCalls = 0;
+  response.destroy = () => { responseDestroyCalls += 1; };
+  const operations = { destroy: 0, end: 0, once: 0, write: 0 };
+  const request = {
+    destroy() { operations.destroy += 1; },
+    end() { operations.end += 1; },
+    once() { operations.once += 1; },
+    write() { operations.write += 1; },
+  };
+  let requestCalls = 0;
+
+  const result = await requestLovartModeQuery({
+    accessKey: "a",
+    secretKey: "s",
+    requestImpl: (_options, onResponse) => {
+      requestCalls += 1;
+      onResponse(response);
+      response.emit("data", Buffer.from('{"sync":true}'));
+      response.emit("end");
+      return request;
+    },
+  });
+
+  assert.deepEqual(result, { sync: true });
+  assert.equal(requestCalls, 1);
+  assert.deepEqual(operations, { destroy: 1, end: 0, once: 0, write: 0 });
+  assert.equal(responseDestroyCalls, 0);
+  timer.assertSingleFixedTimerCleared();
+});
+
+test("a response arriving after timeout is destroyed without listeners or a second settlement", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const request = new EventEmitter();
+  let requestDestroyCalls = 0;
+  request.write = () => {};
+  request.end = () => {};
+  request.destroy = (error) => {
+    requestDestroyCalls += 1;
+    request.emit("error", error);
+  };
+  let onResponse;
+  let settlements = 0;
+  const outcome = requestLovartModeQuery({
+    accessKey: "a",
+    secretKey: "s",
+    requestImpl: (_options, callback) => {
+      onResponse = callback;
+      return request;
+    },
+  });
+  outcome.then(() => { settlements += 1; }, () => { settlements += 1; });
+
+  t.mock.timers.tick(8_000);
+  await assert.rejects(outcome, (error) => error.code === "UPSTREAM_UNREACHABLE");
+
+  const lateResponse = new EventEmitter();
+  lateResponse.statusCode = 200;
+  let lateDestroyCalls = 0;
+  lateResponse.destroy = () => { lateDestroyCalls += 1; };
+  onResponse(lateResponse);
+  lateResponse.emit("data", Buffer.from('{"late":true}'));
+  lateResponse.emit("end");
+  await Promise.resolve();
+
+  assert.equal(settlements, 1);
+  assert.equal(requestDestroyCalls, 1);
+  assert.equal(lateDestroyCalls, 1);
+  assert.equal(lateResponse.eventNames().length, 0);
+});
 
 test("a response larger than 65,536 bytes is rejected and destroyed", async () => {
   const call = await assertFailure({

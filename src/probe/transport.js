@@ -23,10 +23,37 @@ const FAILURE_MESSAGES = Object.freeze({
   UPSTREAM_SCHEMA_UNRECOGNIZED: "Lovart upstream response was not recognized",
 });
 
-const TLS_ERROR_CODES = new Set([
+const TLS_VERIFICATION_ERROR_CODES = new Set([
+  "APPLICATION_VERIFICATION",
+  "CERT_CHAIN_TOO_LONG",
+  "CERT_HAS_EXPIRED",
+  "CERT_NOT_YET_VALID",
+  "CERT_REJECTED",
+  "CERT_REVOKED",
+  "CERT_SIGNATURE_FAILURE",
+  "CERT_UNTRUSTED",
+  "CRL_HAS_EXPIRED",
+  "CRL_NOT_YET_VALID",
+  "CRL_SIGNATURE_FAILURE",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
   "EPROTO",
+  "ERROR_IN_CERT_NOT_AFTER_FIELD",
+  "ERROR_IN_CERT_NOT_BEFORE_FIELD",
+  "ERROR_IN_CRL_LAST_UPDATE_FIELD",
+  "ERROR_IN_CRL_NEXT_UPDATE_FIELD",
   "HOSTNAME_MISMATCH",
+  "INVALID_CA",
+  "INVALID_PURPOSE",
+  "OUT_OF_MEM",
+  "PATH_LENGTH_EXCEEDED",
   "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY",
+  "UNABLE_TO_DECRYPT_CERT_SIGNATURE",
+  "UNABLE_TO_DECRYPT_CRL_SIGNATURE",
+  "UNABLE_TO_GET_CRL",
+  "UNABLE_TO_GET_ISSUER_CERT",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
 ]);
 
 function stableFailure(code) {
@@ -35,12 +62,9 @@ function stableFailure(code) {
 
 function isTlsFailure(error) {
   const code = typeof error?.code === "string" ? error.code.toUpperCase() : "";
-  return TLS_ERROR_CODES.has(code)
-    || code.startsWith("CERT_")
-    || code.startsWith("DEPTH_")
+  return TLS_VERIFICATION_ERROR_CODES.has(code)
     || code.startsWith("ERR_SSL_")
-    || code.startsWith("ERR_TLS_")
-    || code.startsWith("UNABLE_TO_");
+    || code.startsWith("ERR_TLS_");
 }
 
 function mapRequestFailure(error) {
@@ -106,6 +130,7 @@ export async function requestLovartModeQuery({
     protocol: "https:",
     hostname: LOVART_HOSTNAME,
     port: 443,
+    agent: false,
     method: LOVART_METHOD,
     path: LOVART_PATH,
     rejectUnauthorized: true,
@@ -140,6 +165,10 @@ export async function requestLovartModeQuery({
     };
 
     const onResponse = (response) => {
+      if (settled) {
+        response.destroy();
+        return;
+      }
       const statusFailure = mapStatusFailure(response.statusCode ?? 0);
       if (statusFailure) {
         finish(statusFailure, undefined, response);
@@ -176,8 +205,20 @@ export async function requestLovartModeQuery({
 
     try {
       request = requestImpl(options, onResponse);
+      if (settled) {
+        request?.destroy();
+        return;
+      }
       request.once("error", (error) => finish(mapRequestFailure(error), undefined, undefined, false));
+      if (settled) {
+        request.destroy();
+        return;
+      }
       request.write(LOVART_BODY);
+      if (settled) {
+        request.destroy();
+        return;
+      }
       request.end();
     } catch (error) {
       finish(mapRequestFailure(error));
