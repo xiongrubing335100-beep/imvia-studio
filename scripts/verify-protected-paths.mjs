@@ -19,11 +19,53 @@ function usage() {
 }
 
 function normalizeRelative(value) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`Protected root must be a non-empty relative path: ${String(value)}`);
+  }
   const relative = path.normalize(value);
-  if (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)) {
+  if (path.isAbsolute(relative) || relative === "." || relative === ".." || relative.startsWith(`..${path.sep}`)) {
     throw new Error(`Protected root must stay inside the workspace: ${value}`);
   }
   return relative;
+}
+
+function validateManifest(manifest) {
+  if (!manifest || Array.isArray(manifest) || typeof manifest !== "object") {
+    throw new Error("Protected-path manifest must be an object");
+  }
+  if (manifest.version !== 1) throw new Error("Protected-path manifest must use version 1");
+  if (!Array.isArray(manifest.roots) || manifest.roots.length === 0) {
+    throw new Error("Protected-path manifest roots must be a non-empty array");
+  }
+  const roots = manifest.roots.map(normalizeRelative);
+  if (roots.some((root, index) => root !== manifest.roots[index])) {
+    throw new Error("Protected-path manifest roots must use normalized relative paths");
+  }
+  if (JSON.stringify(roots) !== JSON.stringify([...roots].sort())) {
+    throw new Error("Protected-path manifest roots must be sorted");
+  }
+  if (new Set(roots).size !== roots.length) throw new Error("Protected-path manifest contains a duplicate protected root");
+  if (!Array.isArray(manifest.files)) throw new Error("Protected-path manifest files must be an array");
+
+  const paths = new Set();
+  for (const file of manifest.files) {
+    if (!file || Array.isArray(file) || typeof file !== "object" || typeof file.path !== "string") {
+      throw new Error("Protected-path manifest contains an invalid file entry");
+    }
+    const relativePath = normalizeRelative(file.path);
+    if (relativePath !== file.path) throw new Error(`Protected path must be normalized: ${file.path}`);
+    if (paths.has(relativePath)) throw new Error(`Protected-path manifest contains a duplicate protected path: ${relativePath}`);
+    paths.add(relativePath);
+    if (!roots.some((root) => relativePath === root || relativePath.startsWith(`${root}${path.sep}`))) {
+      throw new Error(`Protected path is outside the declared roots: ${relativePath}`);
+    }
+    if (!["file", "symlink"].includes(file.type)
+      || !Number.isSafeInteger(file.size_bytes) || file.size_bytes < 0
+      || typeof file.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(file.sha256)) {
+      throw new Error(`Protected-path manifest metadata is invalid: ${relativePath}`);
+    }
+  }
+  return { version: 1, roots, files: manifest.files };
 }
 
 async function sha256(filePath) {
@@ -33,7 +75,7 @@ async function sha256(filePath) {
 async function candidateContainsRoots(base, roots) {
   const existence = await Promise.all(roots.map(async (root) => {
     try {
-      await stat(path.resolve(base, normalizeRelative(root)));
+      await stat(path.resolve(base, root));
       return true;
     } catch {
       return false;
@@ -98,6 +140,8 @@ async function snapshot(protectedBase, roots) {
 }
 
 function compare(expected, actual) {
+  validateManifest(expected);
+  validateManifest(actual);
   const expectedSerialized = JSON.stringify(expected);
   const actualSerialized = JSON.stringify(actual);
   if (expectedSerialized === actualSerialized) return [];
@@ -107,7 +151,7 @@ function compare(expected, actual) {
   for (const file of expected.files) {
     const found = actualByPath.get(file.path);
     if (!found) differences.push(`removed: ${file.path}`);
-    else if (found.size_bytes !== file.size_bytes || found.sha256 !== file.sha256) differences.push(`changed: ${file.path}`);
+    else if (found.type !== file.type || found.size_bytes !== file.size_bytes || found.sha256 !== file.sha256) differences.push(`changed: ${file.path}`);
   }
   for (const file of actual.files) if (!expectedByPath.has(file.path)) differences.push(`added: ${file.path}`);
   return differences;
@@ -117,7 +161,7 @@ async function main() {
   const [mode, manifestArgument] = process.argv.slice(2);
   if (!mode || !manifestArgument || !["snapshot", "verify"].includes(mode)) usage();
   const manifestPath = path.resolve(packageDirectory, manifestArgument);
-  const existing = JSON.parse(await readFile(manifestPath, "utf8"));
+  const existing = validateManifest(JSON.parse(await readFile(manifestPath, "utf8")));
   const protectedBase = await selectProtectedBase(existing.roots);
   if (mode === "snapshot") {
     const result = await snapshot(protectedBase, existing.roots);

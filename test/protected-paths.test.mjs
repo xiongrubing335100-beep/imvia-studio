@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -13,14 +13,30 @@ const packageDirectory = path.basename(worktreesDirectory) === ".worktrees"
   ? path.dirname(worktreesDirectory)
   : pluginRoot;
 const verifier = path.join(pluginRoot, "scripts/verify-protected-paths.mjs");
-const protectedRoots = ["lovart-codex-plugin", "lovart-local-marketplace", "lovart-output"];
-const protectedBaseCandidates = [
-  path.dirname(packageDirectory),
-  path.join(path.dirname(packageDirectory), "lovart插件"),
-];
-const hasProtectedWorkspace = protectedBaseCandidates.some(
-  (base) => protectedRoots.every((root) => existsSync(path.join(base, root))),
-);
+const liveManifestPath = path.join(pluginRoot, "test/protected-paths.manifest.json");
+
+function protectedBaseCandidatesFor(packageRoot) {
+  return [
+    path.dirname(packageRoot),
+    path.join(path.dirname(packageRoot), "lovart插件"),
+  ];
+}
+
+function hasProtectedWorkspaceForManifest({ packageDirectory: packageRoot, manifestPath }) {
+  let roots;
+  try {
+    roots = JSON.parse(readFileSync(manifestPath, "utf8")).roots;
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(roots) || roots.length === 0 || roots.some((root) => typeof root !== "string" || root.length === 0)) return false;
+  return protectedBaseCandidatesFor(packageRoot).some(
+    (base) => roots.every((root) => existsSync(path.join(base, root))),
+  );
+}
+
+const protectedBaseCandidates = protectedBaseCandidatesFor(packageDirectory);
+const hasProtectedWorkspace = hasProtectedWorkspaceForManifest({ packageDirectory, manifestPath: liveManifestPath });
 
 test("protected-path verifier accepts an unchanged manifest and rejects a mutation", async (context) => {
   const protectedBase = protectedBaseCandidates[0];
@@ -37,12 +53,84 @@ test("protected-path verifier accepts an unchanged manifest and rejects a mutati
   const clean = spawnSync(process.execPath, [verifier, "verify", manifestPath], { cwd: pluginRoot, encoding: "utf8" });
   assert.equal(clean.status, 0, clean.stderr);
 
+  const typeFlippedManifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  typeFlippedManifest.files[0].type = "symlink";
+  await writeFile(manifestPath, JSON.stringify(typeFlippedManifest));
+  const typeFlipped = spawnSync(process.execPath, [verifier, "verify", manifestPath], { cwd: pluginRoot, encoding: "utf8" });
+  assert.notEqual(typeFlipped.status, 0);
+  assert.match(typeFlipped.stderr, /changed: .*asset\.txt/);
+
+  typeFlippedManifest.files[0].type = "file";
+  await writeFile(manifestPath, JSON.stringify(typeFlippedManifest));
+
   await writeFile(path.join(protectedRoot, "asset.txt"), "mutated\n");
   const changed = spawnSync(process.execPath, [verifier, "verify", manifestPath], { cwd: pluginRoot, encoding: "utf8" });
   assert.notEqual(changed.status, 0);
   assert.match(changed.stderr, /changed: .*asset\.txt/);
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   assert.equal(manifest.files.length, 1);
+});
+
+test("manifest roots drive live-workspace detection without a hard-coded root list", async (context) => {
+  const sandbox = await mkdtemp(path.join(pluginRoot, ".protected-detection-test-"));
+  context.after(() => rm(sandbox, { recursive: true, force: true }));
+  const candidateBase = path.dirname(sandbox);
+  const manifestPath = path.join(sandbox, "manifest.json");
+  const presentRoot = path.relative(candidateBase, path.join(sandbox, "present-root"));
+  await mkdir(path.join(candidateBase, presentRoot), { recursive: true });
+  await writeFile(manifestPath, JSON.stringify({ version: 1, roots: [presentRoot], files: [] }));
+
+  assert.equal(hasProtectedWorkspaceForManifest({ packageDirectory: sandbox, manifestPath }), true);
+  await writeFile(manifestPath, JSON.stringify({ version: 1, roots: ["missing-root"], files: [] }));
+  assert.equal(hasProtectedWorkspaceForManifest({ packageDirectory: sandbox, manifestPath }), false);
+});
+
+test("verifier rejects invalid manifest metadata and duplicate paths", async (context) => {
+  const protectedBase = protectedBaseCandidates[0];
+  const sandbox = await mkdtemp(path.join(pluginRoot, ".protected-metadata-test-"));
+  context.after(() => rm(sandbox, { recursive: true, force: true }));
+  const roots = ["a", "b"].map((name) => path.relative(protectedBase, path.join(sandbox, name))).sort();
+  for (const root of roots) await mkdir(path.join(protectedBase, root), { recursive: true });
+  await writeFile(path.join(protectedBase, roots[0], "asset.txt"), "same\n");
+  const manifestPath = path.join(sandbox, "manifest.json");
+  await writeFile(manifestPath, JSON.stringify({ version: 1, roots, files: [] }));
+  const snapshot = spawnSync(process.execPath, [verifier, "snapshot", manifestPath], { encoding: "utf8" });
+  assert.equal(snapshot.status, 0, snapshot.stderr);
+  const baseline = JSON.parse(await readFile(manifestPath, "utf8"));
+  const mutations = [
+    [{ ...baseline, version: 2 }, /version 1/],
+    [{ ...baseline, roots: [...baseline.roots].reverse() }, /sorted/],
+    [{ ...baseline, roots: [...baseline.roots, baseline.roots[0]].sort() }, /duplicate protected root/],
+    [{ ...baseline, files: [...baseline.files, baseline.files[0]] }, /duplicate protected path/],
+    [{ ...baseline, files: [{ ...baseline.files[0], path: "outside.txt" }] }, /outside the declared roots/],
+  ];
+  for (const [manifest, expectedError] of mutations) {
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const verification = spawnSync(process.execPath, [verifier, "verify", manifestPath], { encoding: "utf8" });
+    assert.notEqual(verification.status, 0, JSON.stringify(manifest));
+    assert.match(verification.stderr, expectedError);
+  }
+});
+
+test("escaping manifest roots retain their explicit validation error", async (context) => {
+  const sandbox = await mkdtemp(path.join(pluginRoot, ".protected-escape-test-"));
+  context.after(() => rm(sandbox, { recursive: true, force: true }));
+  const checkout = path.join(sandbox, "imvia-studio");
+  await mkdir(path.join(checkout, "scripts"), { recursive: true });
+  await mkdir(path.join(checkout, "test"), { recursive: true });
+  await copyFile(verifier, path.join(checkout, "scripts/verify-protected-paths.mjs"));
+  await writeFile(path.join(checkout, "test/manifest.json"), JSON.stringify({
+    version: 1,
+    roots: ["../escape"],
+    files: [],
+  }));
+  const verification = spawnSync(
+    process.execPath,
+    [path.join(checkout, "scripts/verify-protected-paths.mjs"), "verify", "test/manifest.json"],
+    { encoding: "utf8" },
+  );
+  assert.notEqual(verification.status, 0);
+  assert.match(verification.stderr, /Protected root must stay inside the workspace: \.\.\/escape/);
 });
 
 test("relative manifests and protected roots resolve in both supported repository layouts", async (context) => {
@@ -116,10 +204,9 @@ test("package verification command uses the repository-relative manifest", async
 });
 
 test("current Lovart protected paths still match the recorded baseline", { skip: !hasProtectedWorkspace }, () => {
-  const manifestPath = path.join(pluginRoot, "test/protected-paths.manifest.json");
   const verification = spawnSync(
     process.execPath,
-    [verifier, "verify", manifestPath],
+    [verifier, "verify", liveManifestPath],
     { cwd: packageDirectory, encoding: "utf8" },
   );
   assert.equal(verification.status, 0, verification.stderr);

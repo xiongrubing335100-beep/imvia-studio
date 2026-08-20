@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -6,20 +7,59 @@ import { fileURLToPath } from "node:url";
 
 const packageDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const probeDirectory = path.join(packageDirectory, "src/probe");
-const productionScriptPaths = [
-  "scripts/configure-lovart-readonly.swift",
-  "scripts/set-lovart-readonly-probe.mjs",
-];
-const allowedBoundaryConstantKeys = new Set([
-  "CREDENTIAL_REFERENCE_UNAVAILABLE",
-  "UPSTREAM_UNREACHABLE",
-  "UPSTREAM_SECURITY_REJECTED",
-  "AUTHENTICATION_FAILED",
-  "UPSTREAM_RATE_LIMITED",
-  "UPSTREAM_UNAVAILABLE",
-  "UPSTREAM_SCHEMA_UNRECOGNIZED",
-  "STORE_UNAVAILABLE",
+
+const reviewedProductionHashes = Object.freeze({
+  "scripts/configure-lovart-readonly.swift": "137fc6674246aa624466b1a9ba1403ffaf6b82f8cca6b1111a5a642a67a010bd",
+  "scripts/set-lovart-readonly-probe.mjs": "fae16a18f93ab274b64053889b505c3c59e3404682c6a7266d55ae6372518b66",
+  "src/persistence/json-store.js": "f269ef6d307d7501432bea9c8d46c0a22364709c3b09dc30d88fab794712e1a9",
+  "src/probe/authorization-service.js": "a3e2fb86a9aaad5a5d7bbdd829e8111cfd05f45df54804bcec4455bc04015a71",
+  "src/probe/capability-normalizer.js": "f3ee013051aa8db5367a61dc9c5bda38d543d8228c7fc044d62e48603e48fd09",
+  "src/probe/child-core.js": "bbfd3b4676d81cdac39b35b0b6ebc5801fc3d1e712b4b2ccf99a9bf0df9c2939",
+  "src/probe/child-runner.js": "87c959ca5bedd8fa78cd2abefb61926ae3e76602d07da519193ccbcb1bf64470",
+  "src/probe/child.js": "f3d45e816940c24fdcee0a00b0a33a569bebfdfe5f3fade81c85da3526c79914",
+  "src/probe/constants.js": "eadff6620237d3ae968bea3eae15e702381029e7572b85e7c832f4e9f8ba71b9",
+  "src/probe/keychain-provider.js": "203a5a5eea632b07a9911dcf83d1de0b371d14497f440d980f42c5e35f713c0f",
+  "src/probe/probe-service.js": "6da41d3894a27a17ade4d128148d70fc74899fa8f4ebfedc822bc97866457986",
+  "src/probe/probe-store.js": "7dc68b8154dbf792ed03d1007d40f87203353250cda185009814a45cf13fe176",
+  "src/probe/transport.js": "eb14acf43af1d0a6d86936cb79b5f4acab5f908914eafc2dfaaff843a1ca2f34",
+});
+const reviewedNormalizedIndexHash = "8853818dea79ce0c6144a786180e998aa0596427fb1435df05bffe3f8d2cb49a";
+
+const reviewedImports = Object.freeze({
+  "scripts/configure-lovart-readonly.swift": ["AppKit", "Darwin", "Security"],
+  "scripts/set-lovart-readonly-probe.mjs": ["../src/probe/authorization-service.js", "../src/probe/probe-store.js", "node:path", "node:url"],
+  "src/index.js": [
+    "./domain/timestamps.js", "./domain/workbench-service.js", "./http/server.js",
+    "./probe/authorization-service.js", "./probe/child-runner.js", "./probe/probe-service.js",
+    "./probe/probe-store.js", "@modelcontextprotocol/sdk/server/mcp.js",
+    "@modelcontextprotocol/sdk/server/stdio.js", "node:path", "node:url", "zod",
+  ],
+  "src/persistence/json-store.js": ["node:crypto", "node:fs/promises", "node:path", "node:timers/promises"],
+  "src/probe/authorization-service.js": ["../domain/errors.js", "../domain/model-capabilities.js", "./constants.js", "node:crypto"],
+  "src/probe/capability-normalizer.js": ["../domain/errors.js", "../domain/model-capabilities.js", "./constants.js"],
+  "src/probe/child-core.js": ["../domain/errors.js"],
+  "src/probe/child-runner.js": ["../domain/errors.js", "../domain/model-capabilities.js", "./constants.js", "node:child_process", "node:path", "node:url"],
+  "src/probe/child.js": ["./capability-normalizer.js", "./child-core.js", "./keychain-provider.js", "./transport.js"],
+  "src/probe/constants.js": [],
+  "src/probe/keychain-provider.js": ["../domain/errors.js", "./constants.js", "node:child_process"],
+  "src/probe/probe-service.js": ["../domain/errors.js"],
+  "src/probe/probe-store.js": ["../persistence/json-store.js", "./constants.js"],
+  "src/probe/transport.js": ["../domain/errors.js", "./constants.js", "node:crypto", "node:https"],
+});
+
+const reviewedOperationIdentifiers = new Set([
+  "PROBE_RESULT_TTL_MS", "capability_status", "destroyRequest",
+  "generate_image_midjourney", "generate_image_nano_banana_2",
+  "generate_image_nano_banana_pro", "generate_image_seedream_v4",
+  "generate_image_seedream_v5", "generate_video_kling_v3",
+  "generate_video_kling_v3_omni", "generate_video_minimax_h3",
+  "generate_video_seedance_v2_0_fast", "generate_video_seedance_v2_5",
+  "httpsRequest", "mapRequestFailure", "mapStatusFailure", "request",
+  "requestImpl", "requestLovartModeQuery", "result", "status", "statusCode",
+  "statusFailure",
 ]);
+const sensitiveValuePattern = /(?:accessKey|secretKey|credential|raw|header|signature|account|billing|balance)/i;
+const reviewedSensitiveFlows = new Set(["keychainProvider:readProbeCredentials"]);
 
 async function recursiveFiles(directory, suffix) {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -38,10 +78,8 @@ async function readNamedSources(paths) {
   })));
 }
 
-async function readProductionSources() {
-  const probePaths = (await recursiveFiles(probeDirectory, ".js"))
-    .map((filePath) => path.relative(packageDirectory, filePath));
-  return readNamedSources([...probePaths, "src/index.js", ...productionScriptPaths]);
+function sha256(source) {
+  return createHash("sha256").update(source).digest("hex");
 }
 
 function maskLiteralsAndComments(source) {
@@ -88,156 +126,187 @@ function maskLiteralsAndComments(source) {
   return result;
 }
 
-function extractBalanced(source, openingIndex, open = "(", close = ")") {
-  assert.equal(source[openingIndex], open);
+function extractBalanced(source, openingIndex) {
   let depth = 0;
   for (let index = openingIndex; index < source.length; index += 1) {
-    if (source[index] === open) depth += 1;
-    if (source[index] === close) depth -= 1;
+    if (source[index] === "(") depth += 1;
+    if (source[index] === ")") depth -= 1;
     if (depth === 0) return source.slice(openingIndex + 1, index);
   }
-  throw new Error(`Unbalanced ${open}${close} group`);
+  throw new Error("Unbalanced call expression");
 }
 
-function normalizedIdentifier(value) {
-  return value.replaceAll(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+function extractModuleSpecifiers(source, sourcePath) {
+  if (sourcePath.endsWith(".swift")) {
+    return [...source.matchAll(/^import\s+([A-Za-z][\w.]*)\s*$/gm)].map((match) => match[1]).sort();
+  }
+  const specifiers = [];
+  for (const match of source.matchAll(/\bfrom\s*(["'])([^"']+)\1|\bimport\s*(["'])([^"']+)\3/g)) {
+    specifiers.push(match[2] ?? match[4]);
+  }
+  for (const match of source.matchAll(/\b(?:import|require)\s*\(\s*(["'])([^"']+)\1\s*\)/g)) {
+    specifiers.push(match[2]);
+  }
+  return specifiers.sort();
 }
 
-function objectKeys(source) {
+function auditProductionSource(sourcePath, source, { enforceImports = true } = {}) {
+  const violations = [];
   const code = maskLiteralsAndComments(source);
-  const keys = [];
-  for (const match of code.matchAll(/(?:^|[,{])\s*([A-Za-z_$][\w$]*)\s*:/gm)) keys.push(match[1]);
-  for (const match of code.matchAll(/\b(?:state|record|attempt|summary|envelope|result)\.([A-Za-z_$][\w$]*)\s*=/g)) {
-    keys.push(match[1]);
+  const imports = extractModuleSpecifiers(source, sourcePath);
+  if (enforceImports && Object.hasOwn(reviewedImports, sourcePath)
+    && JSON.stringify(imports) !== JSON.stringify(reviewedImports[sourcePath])) {
+    violations.push("import allowlist changed");
   }
-  return keys;
-}
-
-function assertNoForbiddenKeys(source, forbidden, label) {
-  for (const key of objectKeys(source)) {
-    if (allowedBoundaryConstantKeys.has(key)) continue;
-    const normalized = normalizedIdentifier(key);
-    assert.equal(
-      forbidden.some((word) => normalized === word || normalized.startsWith(`${word}_`) || normalized.endsWith(`_${word}`)),
-      false,
-      `${label} exposes forbidden field ${key}`,
-    );
-  }
-}
-
-test("production probe has no protected Lovart dependency or expanded operation authority", async () => {
-  const production = await readProductionSources();
-  const protectedReferences = [
-    "lovart-codex-plugin",
-    "/lovart插件",
-    ".codex/plugins/cache/lovart",
-    ".worktrees/lovart-local",
-  ];
-  for (const { path: sourcePath, source } of production) {
-    for (const forbidden of protectedReferences) {
-      assert.equal(source.toLowerCase().includes(forbidden.toLowerCase()), false, `${sourcePath}: ${forbidden}`);
-    }
+  if (/\bimport\s*\(\s*[^"'\s]/.test(code)) violations.push("dynamic non-literal import");
+  if (/lovart-codex-plugin|\/lovart插件|\.codex\/plugins\/cache\/lovart|\.worktrees\/lovart-local/i.test(source)) {
+    violations.push("protected Lovart dependency");
   }
 
-  const probeSources = production.filter(({ path: sourcePath }) => sourcePath.startsWith("src/probe/"));
-  const forbiddenOperation = /^(?:upload|generate|confirm|create_?project|create_?thread|query_?result|query_?status|query_?balance)$/i;
-  const forbiddenGenericRequest = /^(?:request|send_?request|execute_?request|request_?operation)$/i;
-  for (const { path: sourcePath, source } of probeSources) {
-    const code = maskLiteralsAndComments(source);
-    for (const match of code.matchAll(/\bexport\s+(?:(?:async\s+)?function|class|const|let|var)\s+([A-Za-z_$][\w$]*)/g)) {
-      assert.doesNotMatch(match[1], forbiddenOperation, `${sourcePath}: forbidden operation export ${match[1]}`);
-      assert.doesNotMatch(match[1], forbiddenGenericRequest, `${sourcePath}: generic request export ${match[1]}`);
-    }
-    assert.doesNotMatch(
-      source,
-      /\/(?:upload|generate|confirm|projects?|threads?|results?|status|balance)(?:\/|["'`])/i,
-      `${sourcePath}: forbidden endpoint`,
-    );
+  const networkModules = imports.filter((specifier) => /^node:(?:http|https|net|tls|dns)$/.test(specifier));
+  if (sourcePath === "src/probe/transport.js") {
+    if (JSON.stringify(networkModules) !== JSON.stringify(["node:https"])) violations.push("transport network import changed");
+    if (/\bhttpsRequest\s*\(/.test(code)) violations.push("transport bypassed request seam");
+  } else if (networkModules.length || /\b(?:httpsRequest|fetch)\s*\(/.test(code)) {
+    violations.push("network authority outside transport");
   }
-});
 
-test("probe transport provenance and its only endpoint remain pinned", async () => {
-  const constants = await import("../src/probe/constants.js");
-  assert.equal(constants.LOVART_ORIGIN, "https://lgw.lovart.ai");
-  assert.equal(constants.LOVART_PATH, "/v1/openapi/mode/query");
-  assert.equal(constants.LOVART_METHOD, "POST");
-  assert.equal(constants.LOVART_SKILL_VERSION, "1.0.11");
-  assert.equal(constants.LOVART_CLIENT_SHA256, "39c68e32c2262f7f1b3890f684e33b149f9da3d5577fc591b7b4e640a87e4878");
-  assert.equal(constants.LOVART_SKILL_SHA256, "561bba809f4ea2e4c4bbb1c02a34e494d21bb688e7a336a058156c26e71bd9d3");
-});
+  const processModules = imports.filter((specifier) => specifier === "node:child_process");
+  const processAllowed = sourcePath === "src/probe/keychain-provider.js" || sourcePath === "src/probe/child-runner.js";
+  if ((!processAllowed && processModules.length) || (!processAllowed && /\b(?:exec|execFile|execSync|spawn|spawnSync)\s*\(/.test(code))) {
+    violations.push("process authority outside reviewed adapter");
+  }
+  if (/\bshell\s*:\s*true\b|\benv\s*:\s*(?:process\.env|\{\s*\.\.\.\s*process\.env)/.test(code)) {
+    violations.push("shell or inherited environment");
+  }
 
-test("probe APIs expose no configurable destination or transport authority", async () => {
-  const production = await readProductionSources();
-  const forbiddenParameters = new Set([
-    "origin", "url", "uri", "hostname", "host", "port", "path", "method",
-    "proxy", "agent", "tls", "ca", "cert", "key", "reject_unauthorized",
-    "redirect", "redirects", "follow_redirects", "retry", "retries", "request_options",
-  ]);
-  for (const { path: sourcePath, source } of production.filter(({ path: value }) => value.startsWith("src/probe/"))) {
-    const code = maskLiteralsAndComments(source);
-    for (const match of code.matchAll(/\bexport\s+(?:async\s+)?function\s+[A-Za-z_$][\w$]*\s*\(/g)) {
-      const openingIndex = match.index + match[0].lastIndexOf("(");
-      const parameters = extractBalanced(code, openingIndex);
-      for (const identifier of parameters.match(/[A-Za-z_$][\w$]*/g) ?? []) {
-        assert.equal(forbiddenParameters.has(normalizedIdentifier(identifier)), false, `${sourcePath}: configurable ${identifier}`);
+  if (/\b(?:writeFile|appendFile|rename|rm|unlink|mkdir)\s*\(/.test(code)
+    && sourcePath !== "src/persistence/json-store.js") {
+    violations.push("filesystem write outside JsonStore");
+  }
+
+  if (sourcePath.startsWith("src/probe/")) {
+    const operationPattern = /(?:upload|generat|confirm|project|thread|result|status|balance|request)/i;
+    for (const identifier of new Set(source.match(/[A-Za-z_$][\w$]*/g) ?? [])) {
+      if (operationPattern.test(identifier) && !reviewedOperationIdentifiers.has(identifier)) {
+        violations.push(`unreviewed operation identifier ${identifier}`);
       }
     }
   }
 
-  const indexSource = production.find(({ path: sourcePath }) => sourcePath === "src/index.js").source;
-  const code = maskLiteralsAndComments(indexSource);
-  const declaration = code.indexOf("const runProbeInput = z.object(");
-  assert.notEqual(declaration, -1, "runProbeInput schema is missing");
-  const openingIndex = code.indexOf("(", declaration);
-  const probeInput = extractBalanced(code, openingIndex);
-  for (const key of objectKeys(probeInput)) {
-    assert.equal(forbiddenParameters.has(normalizedIdentifier(key)), false, `probe MCP input exposes ${key}`);
+  if (/(?:authorization-service|probe-store|child(?:-runner)?|probe-service|json-store)\.js$/.test(sourcePath)) {
+    const propertyPattern = /(?:^|[,{])\s*(?:["']([A-Za-z_$][\w$]*)["']|([A-Za-z_$][\w$]*))\s*:\s*([A-Za-z_$][\w$]*)/gm;
+    for (const match of source.matchAll(propertyPattern)) {
+      const flow = `${match[1] ?? match[2]}:${match[3]}`;
+      if (sensitiveValuePattern.test(match[3]) && !reviewedSensitiveFlows.has(flow)) violations.push(`sensitive value flow ${flow}`);
+    }
+  }
+  return violations;
+}
+
+function auditProbeTestSource(source) {
+  const violations = [];
+  const code = maskLiteralsAndComments(source);
+  const imports = extractModuleSpecifiers(source, "test/fixture.mjs");
+  if (imports.some((specifier) => /^node:(?:http|https|net|tls|dns)$/.test(specifier))) violations.push("real network module");
+  if (/\bfetch\s*\(/.test(code)) violations.push("real fetch");
+  if (/\brequestImpl\s*:\s*(?:https|http|net|tls|dns)\s*\./.test(code)) violations.push("real request implementation");
+  for (const match of code.matchAll(/\brequestLovartModeQuery\s*\(/g)) {
+    const openingIndex = match.index + match[0].lastIndexOf("(");
+    if (!/\brequestImpl\b/.test(extractBalanced(code, openingIndex))) violations.push("missing fake requestImpl");
+  }
+  return violations;
+}
+
+function isProbeRelatedTest(source) {
+  const imports = extractModuleSpecifiers(source, "test/candidate.mjs");
+  return imports.some((specifier) => /(?:^|\/)src\/probe\/|(?:^|\/)src\/index\.js$/.test(specifier))
+    || /scripts\/(?:configure-lovart-readonly|set-lovart-readonly-probe)/.test(source);
+}
+
+test("every production security-boundary file matches its reviewed digest", async () => {
+  const actualProbePaths = (await recursiveFiles(probeDirectory, ".js"))
+    .map((filePath) => path.relative(packageDirectory, filePath));
+  const reviewedProbePaths = Object.keys(reviewedProductionHashes).filter((sourcePath) => sourcePath.startsWith("src/probe/"));
+  assert.deepEqual(actualProbePaths, reviewedProbePaths);
+  const sources = await readNamedSources(Object.keys(reviewedProductionHashes));
+  for (const { path: sourcePath, source } of sources) {
+    assert.equal(sha256(source), reviewedProductionHashes[sourcePath], `${sourcePath} changed; require a separate security review`);
   }
 });
 
-test("production process and transport policy cannot bypass isolation", async () => {
-  const production = await readProductionSources();
-  for (const { path: sourcePath, source } of production) {
-    const code = maskLiteralsAndComments(source);
-    assert.doesNotMatch(code, /\brejectUnauthorized\s*:\s*false\b/, `${sourcePath}: TLS bypass`);
-    assert.doesNotMatch(code, /\b(?:followRedirects?|redirects?)\s*:\s*true\b/, `${sourcePath}: redirect following`);
-    assert.doesNotMatch(code, /\bshell\s*:\s*true\b/, `${sourcePath}: shell execution`);
-    assert.doesNotMatch(code, /\benv\s*:\s*(?:process\.env|\{\s*\.\.\.\s*process\.env)/, `${sourcePath}: inherited environment`);
-    assert.doesNotMatch(code, /\bprocess\.env\.(?:HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY)\b/i, `${sourcePath}: proxy environment`);
-    assert.doesNotMatch(code, /\b(?:exec|execSync|spawnSync)\s*\(/, `${sourcePath}: generic process execution`);
+test("index probe integration matches its reviewed digest except for plugin version", async () => {
+  const source = await readFile(path.join(packageDirectory, "src/index.js"), "utf8");
+  const versionDeclaration = /const PLUGIN_VERSION = "[^"]+";/g;
+  assert.equal([...source.matchAll(versionDeclaration)].length, 1);
+  const normalized = source.replace(versionDeclaration, "const PLUGIN_VERSION = \"<PLUGIN_VERSION>\";");
+  assert.equal(sha256(normalized), reviewedNormalizedIndexHash, "src/index.js probe integration changed; require a separate security review");
+});
+
+test("reviewed files keep exact imports and least-authority structure", async () => {
+  const sources = await readNamedSources(Object.keys(reviewedImports));
+  for (const { path: sourcePath, source } of sources) {
+    assert.deepEqual(extractModuleSpecifiers(source, sourcePath), reviewedImports[sourcePath], `${sourcePath} imports`);
+    assert.deepEqual(auditProductionSource(sourcePath, source), [], sourcePath);
   }
 });
 
-test("secrets and upstream internals cannot cross the child or persistence boundary", async () => {
-  const forbidden = [
-    "credential", "credentials", "access_key", "secret", "secret_key", "raw", "raw_body",
-    "body", "header", "headers", "signature", "account", "account_id", "billing", "billing_mode", "balance",
+test("transport provenance and the single fixed request seam remain pinned", async () => {
+  const constants = await import("../src/probe/constants.js");
+  assert.deepEqual({
+    origin: constants.LOVART_ORIGIN,
+    path: constants.LOVART_PATH,
+    method: constants.LOVART_METHOD,
+    body: constants.LOVART_BODY,
+    skillVersion: constants.LOVART_SKILL_VERSION,
+    clientSha256: constants.LOVART_CLIENT_SHA256,
+    skillSha256: constants.LOVART_SKILL_SHA256,
+  }, {
+    origin: "https://lgw.lovart.ai",
+    path: "/v1/openapi/mode/query",
+    method: "POST",
+    body: "{}",
+    skillVersion: "1.0.11",
+    clientSha256: "39c68e32c2262f7f1b3890f684e33b149f9da3d5577fc591b7b4e640a87e4878",
+    skillSha256: "561bba809f4ea2e4c4bbb1c02a34e494d21bb688e7a336a058156c26e71bd9d3",
+  });
+  const transport = await readFile(path.join(packageDirectory, "src/probe/transport.js"), "utf8");
+  for (const name of ["LOVART_ORIGIN", "LOVART_PATH", "LOVART_METHOD", "LOVART_BODY"]) assert.match(transport, new RegExp(`\\b${name}\\b`));
+  assert.equal((transport.match(/\brequestImpl\s*\(\s*options\s*,\s*onResponse\s*\)/g) ?? []).length, 1);
+  assert.doesNotMatch(maskLiteralsAndComments(transport), /\bhttpsRequest\s*\(/);
+});
+
+test("security reviewer rejects representative authority and value-flow bypasses", async () => {
+  const mutations = [
+    ["src/probe/probe-service.js", "async function persist(value) { await writeFile(target, value); }"],
+    ["src/probe/transport.js", "httpsRequest(endpoint);"],
+    ["src/probe/probe-service.js", "function uploadAsset() {}"],
+    ["src/probe/probe-service.js", "const handlers = { \"uploadAsset\": operation };"],
+    ["src/probe/child.js", "const envelope = { payload: rawResponse };"],
   ];
-  const boundarySources = await readNamedSources([
-    "src/probe/authorization-service.js",
-    "src/probe/probe-store.js",
-    "src/probe/child.js",
-    "src/probe/child-runner.js",
-    "src/probe/probe-service.js",
-  ]);
-  for (const { path: sourcePath, source } of boundarySources) {
-    assertNoForbiddenKeys(source, forbidden, sourcePath);
+  for (const [sourcePath, mutation] of mutations) {
+    const reviewedSource = await readFile(path.join(packageDirectory, sourcePath), "utf8");
+    assert.notEqual(auditProductionSource(sourcePath, `${reviewedSource}\n${mutation}`).length, 0, mutation);
   }
 });
 
-test("probe tests cannot fall through to a real network implementation", async () => {
-  const testPaths = (await recursiveFiles(path.join(packageDirectory, "test"), ".mjs"))
-    .filter((testPath) => /(?:^probe-|^mcp-probe|^capability-normalizer)/.test(path.basename(testPath)));
+test("probe-related tests cannot fall through to a real network implementation", async () => {
+  const testPaths = await recursiveFiles(path.join(packageDirectory, "test"), ".mjs");
   for (const testPath of testPaths) {
     const source = await readFile(testPath, "utf8");
     const relativePath = path.relative(packageDirectory, testPath);
-    assert.doesNotMatch(source, /\bfrom\s+["']node:(?:http|https|net|tls|dns)["']/, `${relativePath}: real network import`);
-    assert.doesNotMatch(maskLiteralsAndComments(source), /\bfetch\s*\(/, `${relativePath}: real fetch`);
-    const code = maskLiteralsAndComments(source);
-    for (const match of code.matchAll(/\brequestLovartModeQuery\s*\(/g)) {
-      const openingIndex = match.index + match[0].lastIndexOf("(");
-      const callArguments = extractBalanced(code, openingIndex);
-      assert.match(callArguments, /\brequestImpl\b/, `${relativePath}: transport call lacks a fake requestImpl`);
-    }
+    if (relativePath === "test/probe-security.test.mjs" || !isProbeRelatedTest(source)) continue;
+    assert.deepEqual(auditProbeTestSource(source), [], relativePath);
   }
+});
+
+test("network-test reviewer rejects static, dynamic, require, fetch, and real request injections", () => {
+  const mutations = [
+    "import https from \"node:https\";",
+    "const https = await import(\"node:https\");",
+    "const net = require(\"node:net\");",
+    "await fetch(target);",
+    "requestLovartModeQuery({ requestImpl: https.request });",
+  ];
+  for (const source of mutations) assert.notEqual(auditProbeTestSource(source).length, 0, source);
 });
