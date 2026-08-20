@@ -1,0 +1,222 @@
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
+import test from "node:test";
+
+const execute = promisify(execFile);
+const repositoryRoot = path.resolve(import.meta.dirname, "..");
+const flagScript = path.join(repositoryRoot, "scripts/set-lovart-readonly-probe.mjs");
+const credentialScript = path.join(repositoryRoot, "scripts/configure-lovart-readonly.swift");
+const stateFileName = "lovart-probe-state-v1.json";
+
+function commandEnvironment(dataDirectory) {
+  const environment = { ...process.env };
+  if (dataDirectory === undefined) delete environment.IMVIA_DATA_DIR;
+  else environment.IMVIA_DATA_DIR = dataDirectory;
+  return environment;
+}
+
+async function runFlag(argument, dataDirectory, script = flagScript) {
+  const arguments_ = Array.isArray(argument) ? argument : [argument];
+  return execute(process.execPath, [script, ...arguments_], {
+    cwd: repositoryRoot,
+    env: commandEnvironment(dataDirectory),
+  });
+}
+
+async function readState(dataDirectory) {
+  return JSON.parse(await readFile(path.join(dataDirectory, stateFileName), "utf8"));
+}
+
+test("credential helper uses protected GUI input and fixed Keychain items", async () => {
+  const source = await readFile(credentialScript, "utf8");
+
+  assert.match(source, /import AppKit/);
+  assert.match(source, /import Security/);
+  assert.equal((source.match(/NSSecureTextField/g) ?? []).length, 2);
+  assert.match(source, /runModal/);
+  assert.match(source, /kSecClassGenericPassword/);
+  assert.match(source, /SecItemCopyMatching/);
+  assert.match(source, /SecItemAdd/);
+  assert.match(source, /SecItemUpdate/);
+  assert.match(source, /ai\.imvia\.studio\.lovart-readonly/);
+  assert.match(source, /access-key/);
+  assert.match(source, /secret-key/);
+
+  const forbidden = [
+    "CommandLine.arguments",
+    "ProcessInfo.processInfo.environment",
+    "getenv(",
+    "readLine(",
+    "standardInput",
+    "FileHandle",
+    "FileManager",
+    "Data(contentsOf:",
+    "String(contentsOf:",
+    "NSPasteboard",
+    "URLSession",
+    "NSURLConnection",
+    "Process(",
+    "NSTask",
+    "/bin/sh",
+    "/bin/zsh",
+  ];
+  for (const token of forbidden) assert.equal(source.includes(token), false, token);
+  assert.doesNotMatch(source, /func\s+\w+\s*\([^)]*\b(?:service|account)\b/i);
+  assert.equal((source.match(/SecItemCopyMatching\(query as CFDictionary, nil\)/g) ?? []).length, 2);
+  assert.doesNotMatch(source, /kSecReturn(?:Data|Attributes|Ref|PersistentRef)/);
+  assert.doesNotMatch(source, /print\s*\([^"\n]/);
+  assert.doesNotMatch(source, /print\s*\("[^"\n]*\\\(/);
+});
+
+test("credential helper rejects empty values and clears protected fields and temporary data", async () => {
+  const source = await readFile(credentialScript, "utf8");
+
+  assert.match(source, /stringValue\.trimmingCharacters\(in:\s*\.whitespacesAndNewlines\)\.isEmpty/);
+  assert.match(source, /accessField\.stringValue\s*=\s*""/);
+  assert.match(source, /secretField\.stringValue\s*=\s*""/);
+  assert.match(source, /accessData\.resetBytes\(in:/);
+  assert.match(source, /secretData\.resetBytes\(in:/);
+
+  const printCalls = [...source.matchAll(/print\s*\(([^\n]*)\)/g)].map((match) => match[1].trim());
+  assert.deepEqual(printCalls, [
+    '"Lovart read-only credentials saved."',
+    '"Lovart read-only credential configuration failed."',
+  ]);
+  assert.ok(printCalls.every((argument) => /^"[^"\\]*"$/.test(argument)), printCalls.join("\n"));
+});
+
+test("flag command creates disabled-by-default state and toggles enabled only", async () => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-probe-flag-"));
+
+  await runFlag("enable", dataDirectory);
+  assert.deepEqual(await readState(dataDirectory), {
+    version: 1,
+    enabled: true,
+    authorizations: [],
+    attempts: [],
+    audit_events: [],
+  });
+
+  await runFlag("disable", dataDirectory);
+  assert.deepEqual(await readState(dataDirectory), {
+    version: 1,
+    enabled: false,
+    authorizations: [],
+    attempts: [],
+    audit_events: [],
+  });
+});
+
+test("flag command preserves rich probe state byte-for-byte except enabled", async () => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-probe-rich-"));
+  await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
+  const original = {
+    version: 1,
+    enabled: false,
+    authorizations: [{
+      id: "authorization-1",
+      kind: "lovart_capability_probe",
+      source: "user:current_session",
+      reason: "prior request",
+      policy_version: "lovart-readonly-probe-v1",
+      issued_at: "2026-08-20T00:00:00.000Z",
+      expires_at: "2026-08-20T00:02:00.000Z",
+      consumed_at: "2026-08-20T00:00:01.000Z",
+      idempotency_key: "authorization-key",
+    }],
+    attempts: [{
+      id: "attempt-1",
+      authorization_id: "authorization-1",
+      idempotency_key: "attempt-key",
+      status: "completed",
+      started_at: "2026-08-20T00:00:01.000Z",
+      completed_at: "2026-08-20T00:00:02.000Z",
+      result: { reachable: true, authenticated: true, service_version: null },
+      error_code: null,
+    }],
+    results: [{ status: "stale", checked_at: "2026-08-20T00:00:02.000Z" }],
+    audit_events: [
+      { type: "authorization_created", authorization_id: "authorization-1", at: "2026-08-20T00:00:00.000Z" },
+      { type: "probe_completed", attempt_id: "attempt-1", at: "2026-08-20T00:00:02.000Z" },
+    ],
+  };
+  const statePath = path.join(dataDirectory, stateFileName);
+  await writeFile(statePath, `${JSON.stringify(original, null, 2)}\n`, { mode: 0o600 });
+
+  await runFlag("enable", dataDirectory);
+  assert.deepEqual(await readState(dataDirectory), { ...original, enabled: true });
+
+  await runFlag("disable", dataDirectory);
+  assert.deepEqual(await readState(dataDirectory), original);
+});
+
+test("flag command rejects every argument shape except one exact enable or disable token", async () => {
+  await stat(flagScript);
+  const invalidArguments = [[], ["enable", "extra"], ["disable", "extra"], ["ENABLE"], ["--enable"], ["true"]];
+  for (const arguments_ of invalidArguments) {
+    const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-probe-invalid-"));
+    await assert.rejects(runFlag(arguments_, dataDirectory));
+    await assert.rejects(readFile(path.join(dataDirectory, stateFileName), "utf8"), { code: "ENOENT" });
+  }
+});
+
+test("IMVIA_DATA_DIR overrides the script-relative default directory", async () => {
+  const temporaryRepository = await mkdtemp(path.join(os.tmpdir(), "imvia-probe-default-"));
+  const temporaryScripts = path.join(temporaryRepository, "scripts");
+  await mkdir(temporaryScripts, { mode: 0o700 });
+  const copiedScript = path.join(temporaryScripts, path.basename(flagScript));
+  await copyFile(flagScript, copiedScript);
+  await symlink(path.join(repositoryRoot, "src"), path.join(temporaryRepository, "src"), "dir");
+
+  const explicitDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-probe-explicit-"));
+  await runFlag("enable", explicitDirectory, copiedScript);
+  assert.equal((await readState(explicitDirectory)).enabled, true);
+  await assert.rejects(
+    readFile(path.join(temporaryRepository, ".imvia-studio-dev", stateFileName), "utf8"),
+    { code: "ENOENT" },
+  );
+
+  await runFlag("disable", undefined, copiedScript);
+  assert.equal((await readState(path.join(temporaryRepository, ".imvia-studio-dev"))).enabled, false);
+});
+
+test("flag command keeps state permissions private and has no credential or network authority", async () => {
+  const source = await readFile(flagScript, "utf8");
+  const imports = [...source.matchAll(/^import[^\n]*from\s+["']([^"']+)["'];?$/gm)].map((match) => match[1]);
+  assert.deepEqual(imports.sort(), [
+    "../src/probe/authorization-service.js",
+    "../src/probe/probe-store.js",
+    "node:path",
+    "node:url",
+  ].sort());
+  assert.doesNotMatch(source, /keychain|transport|child|mcp|https?:|fetch\s*\(|exec|spawn/i);
+  assert.match(source, /setEnabledForUserCommand/);
+
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-probe-mode-"));
+  const { stdout, stderr } = await runFlag("enable", dataDirectory);
+  assert.equal(stdout, "");
+  assert.equal(stderr, "");
+  assert.equal((await stat(dataDirectory)).mode & 0o777, 0o700);
+  assert.equal((await stat(path.join(dataDirectory, stateFileName))).mode & 0o777, 0o600);
+});
+
+test("package exposes only the five targeted Task 8 scripts", async () => {
+  const packageJson = JSON.parse(await readFile(path.join(repositoryRoot, "package.json"), "utf8"));
+  assert.equal(packageJson.scripts["configure:lovart-readonly"], "swift scripts/configure-lovart-readonly.swift");
+  assert.equal(packageJson.scripts["enable:lovart-readonly-probe"], "node scripts/set-lovart-readonly-probe.mjs enable");
+  assert.equal(packageJson.scripts["disable:lovart-readonly-probe"], "node scripts/set-lovart-readonly-probe.mjs disable");
+  assert.equal(packageJson.scripts["test:probe"], "node --test test/json-store.test.mjs test/probe-*.test.mjs test/capability-normalizer.test.mjs test/mcp-probe.test.mjs");
+  assert.equal(packageJson.scripts["test:mcp"], "node --test test/mcp-health.test.mjs test/mcp-probe.test.mjs");
+});

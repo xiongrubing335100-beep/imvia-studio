@@ -8,7 +8,11 @@
     "start": "node src/index.js",
     "test": "node --test test/*.test.mjs",
     "test:orchestration": "node --test test/source-policy.test.mjs test/cost-confirmation.test.mjs test/account-status.test.mjs test/iteration.test.mjs test/orchestration-policy.test.mjs test/fake-lovart-adapter.test.mjs test/agent-workflow.test.mjs test/skill-contract.test.mjs",
-    "test:mcp": "node --test test/mcp-health.test.mjs",
+    "configure:lovart-readonly": "swift scripts/configure-lovart-readonly.swift",
+    "enable:lovart-readonly-probe": "node scripts/set-lovart-readonly-probe.mjs enable",
+    "disable:lovart-readonly-probe": "node scripts/set-lovart-readonly-probe.mjs disable",
+    "test:probe": "node --test test/json-store.test.mjs test/probe-*.test.mjs test/capability-normalizer.test.mjs test/mcp-probe.test.mjs",
+    "test:mcp": "node --test test/mcp-health.test.mjs test/mcp-probe.test.mjs",
     "test:protection": "node --test test/protected-paths.test.mjs",
     "verify:protected-paths": "node scripts/verify-protected-paths.mjs verify imvia-studio/test/protected-paths.manifest.json"
   },
