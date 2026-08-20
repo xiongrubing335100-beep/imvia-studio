@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readdir, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -69,6 +69,32 @@ async function recursiveFiles(directory, suffix) {
     return entry.isFile() && entry.name.endsWith(suffix) ? [entryPath] : [];
   }));
   return nested.flat().sort();
+}
+
+async function inspectProbeInventory(directory) {
+  const paths = [];
+  const violations = [];
+  async function visit(currentDirectory) {
+    const entries = (await readdir(currentDirectory, { withFileTypes: true }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const entryPath = path.join(currentDirectory, entry.name);
+      const relativePath = path.relative(directory, entryPath).split(path.sep).join("/");
+      if (entry.isSymbolicLink()) {
+        violations.push(`symlink: ${relativePath}`);
+      } else if (entry.isDirectory()) {
+        await visit(entryPath);
+      } else if (!entry.isFile()) {
+        violations.push(`non-regular entry: ${relativePath}`);
+      } else if (!entry.name.endsWith(".js")) {
+        violations.push(`non-js file: ${relativePath}`);
+      } else {
+        paths.push(entryPath);
+      }
+    }
+  }
+  await visit(directory);
+  return { paths: paths.sort(), violations };
 }
 
 async function readNamedSources(paths) {
@@ -150,6 +176,16 @@ function extractModuleSpecifiers(source, sourcePath) {
   return specifiers.sort();
 }
 
+function isNetworkModuleSpecifier(specifier) {
+  return /^(?:node:)?(?:http|https|net|tls|dns)$/.test(specifier);
+}
+
+function hasDirectNetworkCall(code) {
+  return /\b(?:http|https)\s*\.\s*request\s*\(/.test(code)
+    || /\bnet\s*\.\s*(?:connect|createConnection)\s*\(/.test(code)
+    || /\b(?:tls|dns)\s*\.\s*[A-Za-z_$][\w$]*\s*\(/.test(code);
+}
+
 function auditProductionSource(sourcePath, source, { enforceImports = true } = {}) {
   const violations = [];
   const code = maskLiteralsAndComments(source);
@@ -163,11 +199,11 @@ function auditProductionSource(sourcePath, source, { enforceImports = true } = {
     violations.push("protected Lovart dependency");
   }
 
-  const networkModules = imports.filter((specifier) => /^node:(?:http|https|net|tls|dns)$/.test(specifier));
+  const networkModules = imports.filter(isNetworkModuleSpecifier);
   if (sourcePath === "src/probe/transport.js") {
     if (JSON.stringify(networkModules) !== JSON.stringify(["node:https"])) violations.push("transport network import changed");
-    if (/\bhttpsRequest\s*\(/.test(code)) violations.push("transport bypassed request seam");
-  } else if (networkModules.length || /\b(?:httpsRequest|fetch)\s*\(/.test(code)) {
+    if (/\bhttpsRequest\s*\(/.test(code) || hasDirectNetworkCall(code)) violations.push("transport bypassed request seam");
+  } else if (networkModules.length || /\b(?:httpsRequest|fetch)\s*\(/.test(code) || hasDirectNetworkCall(code)) {
     violations.push("network authority outside transport");
   }
 
@@ -208,8 +244,9 @@ function auditProbeTestSource(source) {
   const violations = [];
   const code = maskLiteralsAndComments(source);
   const imports = extractModuleSpecifiers(source, "test/fixture.mjs");
-  if (imports.some((specifier) => /^node:(?:http|https|net|tls|dns)$/.test(specifier))) violations.push("real network module");
+  if (imports.some(isNetworkModuleSpecifier)) violations.push("real network module");
   if (/\bfetch\s*\(/.test(code)) violations.push("real fetch");
+  if (hasDirectNetworkCall(code)) violations.push("direct real network call");
   if (/\brequestImpl\s*:\s*(?:https|http|net|tls|dns)\s*\./.test(code)) violations.push("real request implementation");
   for (const match of code.matchAll(/\brequestLovartModeQuery\s*\(/g)) {
     const openingIndex = match.index + match[0].lastIndexOf("(");
@@ -225,7 +262,9 @@ function isProbeRelatedTest(source) {
 }
 
 test("every production security-boundary file matches its reviewed digest", async () => {
-  const actualProbePaths = (await recursiveFiles(probeDirectory, ".js"))
+  const inventory = await inspectProbeInventory(probeDirectory);
+  assert.deepEqual(inventory.violations, []);
+  const actualProbePaths = inventory.paths
     .map((filePath) => path.relative(packageDirectory, filePath));
   const reviewedProbePaths = Object.keys(reviewedProductionHashes).filter((sourcePath) => sourcePath.startsWith("src/probe/"));
   assert.deepEqual(actualProbePaths, reviewedProbePaths);
@@ -233,6 +272,24 @@ test("every production security-boundary file matches its reviewed digest", asyn
   for (const { path: sourcePath, source } of sources) {
     assert.equal(sha256(source), reviewedProductionHashes[sourcePath], `${sourcePath} changed; require a separate security review`);
   }
+});
+
+test("probe inventory rejects non-JavaScript files and file or directory symlinks", async (context) => {
+  const sandbox = await mkdtemp(path.join(packageDirectory, ".probe-inventory-test-"));
+  context.after(() => rm(sandbox, { recursive: true, force: true }));
+  await writeFile(path.join(sandbox, "reviewed.js"), "export {};\n");
+  await writeFile(path.join(sandbox, "rogue.mjs"), "export {};\n");
+  await mkdir(path.join(sandbox, "nested"));
+  await writeFile(path.join(sandbox, "nested/also-reviewed.js"), "export {};\n");
+  await symlink("reviewed.js", path.join(sandbox, "file-link.js"));
+  await symlink("nested", path.join(sandbox, "directory-link"));
+
+  const inventory = await inspectProbeInventory(sandbox);
+  assert.deepEqual(inventory.violations, [
+    "symlink: directory-link",
+    "symlink: file-link.js",
+    "non-js file: rogue.mjs",
+  ]);
 });
 
 test("index probe integration matches its reviewed digest except for plugin version", async () => {
@@ -303,8 +360,13 @@ test("probe-related tests cannot fall through to a real network implementation",
 test("network-test reviewer rejects static, dynamic, require, fetch, and real request injections", () => {
   const mutations = [
     "import https from \"node:https\";",
+    "import https from \"https\"; https.request({});",
     "const https = await import(\"node:https\");",
     "const net = require(\"node:net\");",
+    "const http = require(\"http\"); http.request({});",
+    "const net = await import(\"net\"); net.createConnection({});",
+    "import tls from \"tls\"; tls.connect({});",
+    "const dns = require(\"dns\"); dns.lookup(\"example.invalid\", () => {});",
     "await fetch(target);",
     "requestLovartModeQuery({ requestImpl: https.request });",
   ];

@@ -22,14 +22,33 @@ function protectedBaseCandidatesFor(packageRoot) {
   ];
 }
 
-function hasProtectedWorkspaceForManifest({ packageDirectory: packageRoot, manifestPath }) {
-  let roots;
-  try {
-    roots = JSON.parse(readFileSync(manifestPath, "utf8")).roots;
-  } catch {
-    return false;
+function validatedManifestRoots(manifest) {
+  if (!manifest || Array.isArray(manifest) || typeof manifest !== "object" || manifest.version !== 1) {
+    throw new Error("Protected-path manifest must be an object using version 1");
   }
-  if (!Array.isArray(roots) || roots.length === 0 || roots.some((root) => typeof root !== "string" || root.length === 0)) return false;
+  if (!Array.isArray(manifest.roots) || manifest.roots.length === 0) {
+    throw new Error("Protected-path manifest roots must be a non-empty array");
+  }
+  if (manifest.roots.some((root) => typeof root !== "string" || root.length === 0)) {
+    throw new Error("Protected-path manifest roots must be non-empty strings");
+  }
+  const roots = manifest.roots.map((root) => path.normalize(root));
+  if (roots.some((root, index) => path.isAbsolute(root)
+    || root === "." || root === ".." || root.startsWith(`..${path.sep}`)
+    || root !== manifest.roots[index])) {
+    throw new Error("Protected-path manifest roots must use normalized relative paths");
+  }
+  if (JSON.stringify(roots) !== JSON.stringify([...roots].sort())) {
+    throw new Error("Protected-path manifest roots must be sorted");
+  }
+  if (new Set(roots).size !== roots.length) {
+    throw new Error("Protected-path manifest contains a duplicate protected root");
+  }
+  return roots;
+}
+
+function hasProtectedWorkspaceForManifest({ packageDirectory: packageRoot, manifestPath }) {
+  const roots = validatedManifestRoots(JSON.parse(readFileSync(manifestPath, "utf8")));
   return protectedBaseCandidatesFor(packageRoot).some(
     (base) => roots.every((root) => existsSync(path.join(base, root))),
   );
@@ -83,6 +102,36 @@ test("manifest roots drive live-workspace detection without a hard-coded root li
   assert.equal(hasProtectedWorkspaceForManifest({ packageDirectory: sandbox, manifestPath }), true);
   await writeFile(manifestPath, JSON.stringify({ version: 1, roots: ["missing-root"], files: [] }));
   assert.equal(hasProtectedWorkspaceForManifest({ packageDirectory: sandbox, manifestPath }), false);
+});
+
+test("live-workspace detection fails loudly for a missing or invalid manifest", async (context) => {
+  const sandbox = await mkdtemp(path.join(pluginRoot, ".protected-detection-invalid-test-"));
+  context.after(() => rm(sandbox, { recursive: true, force: true }));
+  const manifestPath = path.join(sandbox, "manifest.json");
+
+  assert.throws(
+    () => hasProtectedWorkspaceForManifest({ packageDirectory: sandbox, manifestPath }),
+    /ENOENT/,
+  );
+  const invalidManifests = [
+    ["not JSON", /JSON/],
+    [JSON.stringify({ version: 2, roots: ["root"] }), /version 1/],
+    [JSON.stringify({ version: 1 }), /non-empty array/],
+    [JSON.stringify({ version: 1, roots: [] }), /non-empty array/],
+    [JSON.stringify({ version: 1, roots: [1] }), /non-empty strings/],
+    [JSON.stringify({ version: 1, roots: ["/absolute"] }), /normalized relative paths/],
+    [JSON.stringify({ version: 1, roots: ["../escape"] }), /normalized relative paths/],
+    [JSON.stringify({ version: 1, roots: ["a/../root"] }), /normalized relative paths/],
+    [JSON.stringify({ version: 1, roots: ["root", "root"] }), /duplicate/],
+  ];
+  for (const [contents, expectedError] of invalidManifests) {
+    await writeFile(manifestPath, contents);
+    assert.throws(
+      () => hasProtectedWorkspaceForManifest({ packageDirectory: sandbox, manifestPath }),
+      expectedError,
+      contents,
+    );
+  }
 });
 
 test("verifier rejects invalid manifest metadata and duplicate paths", async (context) => {
