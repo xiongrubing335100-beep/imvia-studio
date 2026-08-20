@@ -1,0 +1,11 @@
+{
+  "name": "direct-success",
+  "script": [
+    { "tool": "lovart_upload", "response": { "upload_id": "fixture-upload-video-1" } },
+    { "tool": "lovart_upload", "response": { "upload_id": "fixture-upload-image-1" } },
+    { "tool": "lovart_upload", "response": { "upload_id": "fixture-upload-audio-1" } },
+    { "tool": "lovart_generate", "response": { "kind": "generation_started", "thread_id": "fixture-thread-direct" } },
+    { "tool": "lovart_status", "response": { "kind": "status_succeeded" } },
+    { "tool": "lovart_result", "response": { "artifacts": [{ "kind": "video", "local_path": "results/direct.mp4", "mime_type": "video/mp4", "source_artifact_id": "fixture-direct-video" }] } }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "name": "imvia-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Independent IMVIA Studio MCP development plugin.",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test test/*.test.mjs",
+    "test:orchestration": "node --test test/source-policy.test.mjs test/cost-confirmation.test.mjs test/account-status.test.mjs test/iteration.test.mjs test/orchestration-policy.test.mjs test/fake-lovart-adapter.test.mjs test/agent-workflow.test.mjs test/skill-contract.test.mjs",
+    "test:mcp": "node --test test/mcp-health.test.mjs",
+    "test:protection": "node --test test/protected-paths.test.mjs",
+    "verify:protected-paths": "node scripts/verify-protected-paths.mjs verify imvia-studio/test/protected-paths.manifest.json"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "zod": "3.25.76"
+  }
+}

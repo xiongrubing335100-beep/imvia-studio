@@ -1,0 +1,43 @@
+{
+  "name": "local-success-with-cost-confirmation",
+  "transitions": [
+    {
+      "expected_status": "queued_for_agent",
+      "next_status": "uploading",
+      "source": "fixture:lovart_upload"
+    },
+    {
+      "expected_status": "uploading",
+      "next_status": "submitted",
+      "source": "fixture:lovart_generate",
+      "lovart_thread_id": "fixture-thread-001"
+    },
+    {
+      "expected_status": "submitted",
+      "next_status": "awaiting_cost_confirmation",
+      "source": "fixture:lovart_generate",
+      "estimated_cost": {
+        "amount": 135,
+        "unit": "credits"
+      },
+      "source_checked_at": "2026-08-20T00:00:00.000Z"
+    },
+    {
+      "expected_status": "awaiting_cost_confirmation",
+      "next_status": "generating",
+      "source": "fixture:user_confirmed_in_codex"
+    }
+  ],
+  "artifacts": [
+    {
+      "kind": "video",
+      "local_path": "results/rainy-street.mp4",
+      "mime_type": "video/mp4",
+      "source_url": null,
+      "source_artifact_id": "fixture-video-001",
+      "metadata": {
+        "duration_seconds": 10
+      }
+    }
+  ]
+}

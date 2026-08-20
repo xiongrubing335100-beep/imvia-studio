@@ -1,0 +1,10 @@
+{
+  "name": "cost-success",
+  "description": "Requires one explicit accepted decision before generation resumes.",
+  "script": [
+    { "tool": "lovart_generate", "response": { "kind": "cost_confirmation", "thread_id": "fixture-thread-cost", "amount": 135, "unit": "credits", "source": "fixture:lovart_generate", "checked_at": "2026-08-20T00:00:00.000Z" } },
+    { "tool": "lovart_confirm", "response": { "kind": "confirmation_accepted" } },
+    { "tool": "lovart_status", "response": { "kind": "status_succeeded" } },
+    { "tool": "lovart_result", "response": { "artifacts": [{ "kind": "video", "local_path": "results/cost.mp4", "mime_type": "video/mp4", "source_artifact_id": "fixture-cost-video" }] } }
+  ]
+}

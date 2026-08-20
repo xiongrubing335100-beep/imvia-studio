@@ -1,0 +1,47 @@
+{
+  "upload_failure": {
+    "name": "upload-failure",
+    "script": [{ "tool": "lovart_upload", "error": { "code": "UPLOAD_FAILED", "message": "Fixture upload failed." } }]
+  },
+  "submit_failure": {
+    "name": "submit-failure",
+    "script": [{ "tool": "lovart_generate", "error": { "code": "SUBMIT_FIXTURE_FAILED", "message": "Fixture submit failed." } }]
+  },
+  "confirmation_failure": {
+    "name": "confirmation-failure",
+    "script": [
+      { "tool": "lovart_generate", "response": { "kind": "cost_confirmation", "thread_id": "fixture-thread-confirmation-failure", "amount": 135, "unit": "credits", "source": "fixture:lovart_generate", "checked_at": "2026-08-20T00:00:00.000Z" } },
+      { "tool": "lovart_confirm", "error": { "code": "CONFIRM_FIXTURE_FAILED", "message": "Fixture confirmation failed." } },
+      { "tool": "lovart_confirm", "response": { "kind": "confirmation_accepted" } }
+    ]
+  },
+  "generation_failure": {
+    "name": "generation-failure",
+    "script": [
+      { "tool": "lovart_generate", "response": { "kind": "generation_started", "thread_id": "fixture-thread-failed" } },
+      { "tool": "lovart_status", "response": { "kind": "status_failed", "error": { "code": "GENERATION_FAILED", "message": "Fixture generation failed." } } }
+    ]
+  },
+  "local_timeout": {
+    "name": "local-timeout",
+    "script": [
+      { "tool": "lovart_generate", "response": { "kind": "generation_started", "thread_id": "fixture-thread-timeout" } },
+      { "tool": "lovart_status", "response": { "kind": "local_timeout", "reason": "Fixture polling window elapsed." } }
+    ]
+  },
+  "partial_result": {
+    "name": "partial-result",
+    "script": [
+      { "tool": "lovart_generate", "response": { "kind": "generation_started", "thread_id": "fixture-thread-partial" } },
+      { "tool": "lovart_status", "response": { "kind": "status_partially_succeeded" } },
+      { "tool": "lovart_result", "response": { "artifacts": [
+        { "kind": "video", "local_path": "results/partial-ok.mp4", "mime_type": "video/mp4", "source_artifact_id": "fixture-partial-ok" },
+        { "kind": "video", "local_path": "results/missing.mp4", "mime_type": "video/mp4", "source_artifact_id": "fixture-partial-missing" }
+      ] } }
+    ]
+  },
+  "billing": {
+    "name": "billing-mode-only",
+    "script": [{ "tool": "lovart_query_billing_mode", "response": { "billing_mode": "fast", "checked_at": "2026-08-20T00:00:00.000Z", "expires_at": "2026-08-20T00:05:00.000Z" } }]
+  }
+}
