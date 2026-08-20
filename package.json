@@ -1,9 +1,9 @@
 {
   "name": "imvia-studio",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Independent IMVIA Studio MCP development plugin.",
+  "description": "Independent IMVIA Studio MCP with an optional, default-disabled read-only Lovart capability probe.",
   "scripts": {
     "start": "node src/index.js",
     "test": "node --test test/*.test.mjs",

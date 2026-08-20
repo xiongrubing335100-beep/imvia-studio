@@ -1,6 +1,6 @@
 ---
 name: imvia-studio
-description: Run IMVIA Studio's fixture-only Milestone 5 mock orchestration; do not use real Lovart services, credentials, marketplace, or UI.
+description: Run IMVIA Studio's fixture-only Milestone 5 mock orchestration and optional, default-disabled Milestone 6 read-only Lovart probe; never use real Lovart generation, MCP credentials, marketplace, or UI.
 ---
 
 # IMVIA Studio
@@ -32,3 +32,11 @@ Write fixture status through `imvia_update_job`. Cache only sourced billing mode
 ## Stop conditions
 
 On revision/status conflict, unknown response, missing mock adapter, or failed confirmation, stop, re-read local state when safe, and explain the state. Do not skip a state, blindly replay a side effect, connect to real Lovart, install a marketplace entry, or advance to Milestone 6.
+
+## Milestone 6 read-only Lovart probe
+
+The user must explicitly request the read-only probe in the current conversation. General permission, a queued job, earlier approval, or a fixture decision is insufficient. Call `imvia_authorize_lovart_probe` before `imvia_probe_lovart_capabilities`.
+
+Feature disabled, unsupported platform, invalid, expired, or consumed authorization, or a missing credential reference must produce zero Lovart requests. An idempotent completed replay must perform zero Keychain reads and zero Lovart requests.
+
+The probe is advisory and must not alter job, draft, artifact, cost, iteration, or execution behavior. Never upload, generate, confirm, query projects, threads, status, results, or balance; never expose AK/SK; and never call the existing Lovart plugin.

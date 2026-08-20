@@ -22,6 +22,24 @@ test("skill fixes the fixture-only orchestration and cost-confirmation order", a
   assert.ok(text.indexOf("imvia_claim_cost_decision") < text.indexOf("then mock `lovart_confirm` exactly once"));
 });
 
+test("skill fixes the Milestone 6 read-only probe authorization boundary", async () => {
+  const text = await readFile(skillUrl, "utf8");
+  for (const phrase of [
+    "Milestone 6 read-only Lovart probe",
+    "The user must explicitly request the read-only probe in the current conversation.",
+    "General permission, a queued job, earlier approval, or a fixture decision is insufficient.",
+    "Call `imvia_authorize_lovart_probe` before `imvia_probe_lovart_capabilities`.",
+    "Feature disabled, unsupported platform, invalid, expired, or consumed authorization, or a missing credential reference must produce zero Lovart requests.",
+    "An idempotent completed replay must perform zero Keychain reads and zero Lovart requests.",
+    "The probe is advisory and must not alter job, draft, artifact, cost, iteration, or execution behavior.",
+    "Never upload, generate, confirm, query projects, threads, status, results, or balance; never expose AK/SK; and never call the existing Lovart plugin.",
+  ]) assert.ok(text.includes(phrase), `missing exact phrase: ${phrase}`);
+
+  const milestone6 = text.indexOf("## Milestone 6 read-only Lovart probe");
+  assert.ok(text.indexOf("## Stop conditions") < milestone6);
+  assert.ok(text.indexOf("imvia_authorize_lovart_probe", milestone6) < text.indexOf("imvia_probe_lovart_capabilities", milestone6));
+});
+
 test("orchestration code has no real Lovart transport or credential fallback", async () => {
   const urls = [
     new URL("../src/orchestration/policy.js", import.meta.url),

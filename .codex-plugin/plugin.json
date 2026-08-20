@@ -1,18 +1,18 @@
 {
   "name": "imvia-studio",
-  "version": "0.1.0",
-  "description": "Independent local MCP foundation for the IMVIA Studio workbench.",
+  "version": "0.2.0",
+  "description": "Independent local IMVIA Studio MCP with an optional, default-disabled read-only Lovart capability probe.",
   "author": {
     "name": "IMVIA Studio"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "IMVIA Studio",
-    "shortDescription": "Independent local workbench MCP foundation.",
-    "longDescription": "IMVIA Studio provides isolated local MCP, JSON state, task lifecycle, managed result import, and loopback HTTP/SSE services for the IMVIA workbench. It never calls or reconfigures Lovart.",
+    "shortDescription": "Local workbench with an optional read-only probe.",
+    "longDescription": "IMVIA Studio provides isolated local MCP, JSON state, task lifecycle, managed result import, loopback HTTP/SSE services, and an optional default-disabled read-only Lovart capability probe. It never uploads, generates, confirms costs, or reconfigures Lovart.",
     "developerName": "IMVIA Studio",
     "category": "Creativity",
-    "capabilities": ["Local workbench state", "Revision-safe editing", "Task snapshots", "Sourced job lifecycle", "Managed result import", "Loopback HTTP and SSE"],
+    "capabilities": ["Local workbench state", "Revision-safe editing", "Task snapshots", "Sourced job lifecycle", "Managed result import", "Loopback HTTP and SSE", "Optional default-disabled read-only Lovart probe"],
     "defaultPrompt": ["Check the IMVIA Studio MCP health."]
   },
   "mcpServers": "./.mcp.json"

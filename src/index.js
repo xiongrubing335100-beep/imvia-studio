@@ -12,7 +12,7 @@ import { createProbeStore } from "./probe/probe-store.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const PLUGIN_VERSION = "0.1.0";
+const PLUGIN_VERSION = "0.2.0";
 const SCHEMA_VERSION = "1";
 const DEFAULT_HTTP_PORT = 4190;
 const authorizeProbeInput = z.object({
