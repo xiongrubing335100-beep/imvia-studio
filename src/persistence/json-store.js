@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { link, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 const DEFAULT_LOCK_POLL_MS = 20;
-const DEFAULT_INVALID_LOCK_STALE_MS = 1_000;
+const DEFAULT_STALE_LOCK_MS = 2_000;
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 250;
 const LOCK_TOKEN = /^[0-9a-f-]{36}$/;
 
 function clone(value) {
@@ -16,7 +17,7 @@ function positiveInteger(value, fallback) {
   return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
-function parseLockOwner(serialized) {
+function parseOwner(serialized) {
   try {
     const owner = JSON.parse(serialized);
     if (owner?.version !== 1 || !Number.isInteger(owner.pid) || owner.pid <= 0
@@ -28,22 +29,15 @@ function parseLockOwner(serialized) {
   }
 }
 
-function ownerIsAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code !== "ESRCH";
-  }
-}
-
 export class JsonStore {
   #queue = Promise.resolve();
   #lockTimeoutMs;
   #lockPollMs;
-  #invalidLockStaleMs;
-  #lockPath;
-  #recoveryPath;
+  #staleLockMs;
+  #heartbeatIntervalMs;
+  #lockDirectory;
+  #ownerPath;
+  #testHooks;
 
   constructor({
     dataDirectory,
@@ -51,7 +45,9 @@ export class JsonStore {
     stateFileName = "state.json",
     lockTimeoutMs,
     lockPollMs,
-    invalidLockStaleMs,
+    staleLockMs,
+    heartbeatIntervalMs,
+    testHooks,
   }) {
     if (path.basename(stateFileName) !== stateFileName || !stateFileName.endsWith(".json")) {
       throw new TypeError("stateFileName must be a local .json filename");
@@ -59,11 +55,14 @@ export class JsonStore {
     this.dataDirectory = dataDirectory;
     this.createInitialState = createInitialState;
     this.statePath = path.join(dataDirectory, stateFileName);
-    this.#lockPath = `${this.statePath}.lock`;
-    this.#recoveryPath = `${this.#lockPath}.recovery`;
+    this.#lockDirectory = `${this.statePath}.lock`;
+    this.#ownerPath = path.join(this.#lockDirectory, "owner.json");
     this.#lockTimeoutMs = positiveInteger(lockTimeoutMs, DEFAULT_LOCK_TIMEOUT_MS);
     this.#lockPollMs = positiveInteger(lockPollMs, DEFAULT_LOCK_POLL_MS);
-    this.#invalidLockStaleMs = positiveInteger(invalidLockStaleMs, DEFAULT_INVALID_LOCK_STALE_MS);
+    this.#staleLockMs = positiveInteger(staleLockMs, DEFAULT_STALE_LOCK_MS);
+    const requestedHeartbeat = positiveInteger(heartbeatIntervalMs, DEFAULT_HEARTBEAT_INTERVAL_MS);
+    this.#heartbeatIntervalMs = Math.min(requestedHeartbeat, Math.max(1, Math.floor(this.#staleLockMs / 3)));
+    this.#testHooks = testHooks && typeof testHooks === "object" ? testHooks : null;
   }
 
   async read() {
@@ -108,11 +107,11 @@ export class JsonStore {
   }
 
   async #withLock(operation) {
-    const owner = await this.#acquireLock();
+    const lock = await this.#acquireLock();
     try {
       return await operation();
     } finally {
-      await this.#releaseLock(owner);
+      await this.#releaseLock(lock);
     }
   }
 
@@ -120,145 +119,277 @@ export class JsonStore {
     await mkdir(this.dataDirectory, { recursive: true, mode: 0o700 });
     const deadline = Date.now() + this.#lockTimeoutMs;
     while (true) {
-      await this.#finishRecovery();
-      const token = randomUUID();
-      const owner = {
-        version: 1,
-        pid: process.pid,
-        token,
-        created_at_ms: Date.now(),
-      };
-      const serialized = JSON.stringify(owner);
-      const candidatePath = `${this.#lockPath}.${token}.owner`;
-      await writeFile(candidatePath, serialized, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      await this.#cleanupStaleOrphans();
+      await this.#callHook("beforeLockDirectoryCreate");
       try {
-        await link(candidatePath, this.#lockPath);
+        await mkdir(this.#lockDirectory, { mode: 0o700 });
       } catch (error) {
-        await this.#unlinkIfPresent(candidatePath);
         if (error?.code !== "EEXIST") throw error;
-        await this.#recoverLockIfSafe();
+        await this.#callHook("onLockWait");
+        await this.#recoverStaleLock();
         if (Date.now() >= deadline) throw new Error("state lock acquisition timed out");
         await delay(this.#lockPollMs);
         continue;
       }
 
+      const token = randomUUID();
+      let heartbeat;
       try {
-        await stat(this.#recoveryPath);
+        await this.#callHook("afterLockDirectoryCreate", { token });
+        await this.#callHook("beforeOwnerWrite", { token });
+        await writeFile(this.#ownerPath, JSON.stringify({
+          version: 1,
+          pid: process.pid,
+          token,
+          created_at_ms: Date.now(),
+        }), { encoding: "utf8", flag: "wx", mode: 0o600 });
+        heartbeat = this.#startHeartbeat(this.#lockDirectory, token);
+        await this.#callHook("afterOwnerWritten", { token, lockDirectory: this.#lockDirectory });
+        return { token, heartbeat };
       } catch (error) {
-        if (error?.code === "ENOENT") return { serialized, candidatePath };
-        await this.#releaseLock({ serialized, candidatePath });
+        if (heartbeat) await heartbeat.stop();
+        await this.#moveOwnedDirectoryForCleanup(token, "release");
         throw error;
       }
-      await this.#releaseLock({ serialized, candidatePath });
-      if (Date.now() >= deadline) throw new Error("state lock acquisition timed out");
-      await delay(this.#lockPollMs);
     }
   }
 
-  async #releaseLock({ serialized, candidatePath }) {
+  #startHeartbeat(directory, token, ownerFileName = "owner.json") {
+    const ownerPath = path.join(directory, ownerFileName);
+    let stopped = false;
+    let beating = false;
+    let inFlight = Promise.resolve();
+    const beat = () => {
+      if (stopped || beating) return;
+      beating = true;
+      inFlight = (async () => {
+        try {
+          const owner = parseOwner(await readFile(ownerPath, "utf8"));
+          if (!owner || owner.token !== token) return;
+          const now = new Date();
+          await utimes(ownerPath, now, now);
+        } catch (error) {
+          if (error?.code !== "ENOENT") return;
+        }
+      })().finally(() => { beating = false; });
+    };
+    const timer = setInterval(beat, this.#heartbeatIntervalMs);
+    timer.unref();
+    return {
+      stop: async () => {
+        stopped = true;
+        clearInterval(timer);
+        await inFlight;
+      },
+    };
+  }
+
+  async #releaseLock({ token, heartbeat }) {
+    let hookError;
+    let releasePath;
+    let operationHeartbeat;
     try {
-      if (await readFile(this.#lockPath, "utf8") === serialized) await unlink(this.#lockPath);
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-    } finally {
+      const owner = await this.#readOwner(this.#lockDirectory);
+      if (!owner || owner.token !== token) return;
       try {
-        if (await readFile(candidatePath, "utf8") === serialized) await unlink(candidatePath);
+        await this.#callHook("beforeReleaseRename", { token });
+      } catch (error) {
+        hookError = error;
+      }
+      releasePath = `${this.#lockDirectory}.release-${token}-${randomUUID()}`;
+      const operationToken = await this.#writeOperationOwner(this.#lockDirectory);
+      await this.#callHook("afterReleaseOperationOwnerWritten", { token });
+      try {
+        await rename(this.#lockDirectory, releasePath);
       } catch (error) {
         if (error?.code !== "ENOENT") throw error;
+        return;
       }
+      operationHeartbeat = this.#startHeartbeat(releasePath, operationToken, "operation-owner.json");
+    } finally {
+      await heartbeat.stop();
+    }
+
+    try {
+      const movedOwner = await this.#readOwner(releasePath);
+      if (!movedOwner || movedOwner.token !== token) {
+        throw new Error("state lock ownership changed during release");
+      }
+      await this.#callHook("afterReleaseRename", { token, releasePath });
+      if (hookError) throw hookError;
+    } finally {
+      if (operationHeartbeat) await operationHeartbeat.stop();
+      await this.#removeUniquePath(releasePath);
     }
   }
 
-  async #recoverLockIfSafe() {
-    let serialized;
-    let lockStat;
+  async #moveOwnedDirectoryForCleanup(token, kind) {
+    const owner = await this.#readOwner(this.#lockDirectory).catch(() => null);
+    if (!owner || owner.token !== token) return;
+    const uniquePath = `${this.#lockDirectory}.${kind}-${token}-${randomUUID()}`;
     try {
-      [serialized, lockStat] = await Promise.all([
-        readFile(this.#lockPath, "utf8"),
-        stat(this.#lockPath),
-      ]);
+      await rename(this.#lockDirectory, uniquePath);
     } catch (error) {
-      if (error?.code === "ENOENT") return true;
-      throw error;
+      if (error?.code !== "ENOENT") throw error;
+      return;
     }
-    if (!this.#isRecoverable(serialized, lockStat.mtimeMs)) return false;
+    await this.#removeUniquePath(uniquePath);
+  }
+
+  async #recoverStaleLock() {
+    const observed = await this.#readSnapshot(this.#lockDirectory);
+    if (!observed || !this.#isStale(observed)) return false;
+    await this.#callHook("beforeRecoveryClaim", { identity: observed.identity });
+
+    const claimPath = `${this.#lockDirectory}.recover-${observed.key}.claim`;
     try {
-      await link(this.#lockPath, this.#recoveryPath);
+      await mkdir(claimPath, { mode: 0o700 });
     } catch (error) {
-      if (error?.code !== "EEXIST" && error?.code !== "ENOENT") throw error;
-    }
-    await this.#finishRecovery();
-    try {
-      await stat(this.#lockPath);
+      if (error?.code !== "EEXIST") throw error;
+      await this.#callHook("afterRecoveryClaimMiss", { identity: observed.identity });
       return false;
+    }
+
+    const claimToken = randomUUID();
+    let claimHeartbeat;
+    let operationHeartbeat;
+    let recoveryPath;
+    try {
+      await writeFile(path.join(claimPath, "owner.json"), JSON.stringify({
+        version: 1,
+        pid: process.pid,
+        token: claimToken,
+        created_at_ms: Date.now(),
+      }), { encoding: "utf8", flag: "wx", mode: 0o600 });
+      claimHeartbeat = this.#startHeartbeat(claimPath, claimToken);
+
+      const current = await this.#readSnapshot(this.#lockDirectory);
+      if (!current || current.identity !== observed.identity || !this.#isStale(current)) return false;
+
+      recoveryPath = `${this.#lockDirectory}.recovery-${observed.key}-${claimToken}`;
+      const operationToken = await this.#writeOperationOwner(this.#lockDirectory);
+      await this.#callHook("afterRecoveryOperationOwnerWritten", { identity: observed.identity });
+      try {
+        await rename(this.#lockDirectory, recoveryPath);
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+        await this.#callHook("afterRecoveryClaimMiss", { identity: observed.identity });
+        return false;
+      }
+      operationHeartbeat = this.#startHeartbeat(recoveryPath, operationToken, "operation-owner.json");
+      await this.#callHook("afterRecoveryRename", { identity: observed.identity, recoveryPath });
+      await operationHeartbeat.stop();
+      operationHeartbeat = undefined;
+      await this.#removeUniquePath(recoveryPath);
+      recoveryPath = undefined;
+      await this.#callHook("afterRecoveryCleanup", { identity: observed.identity });
+      return true;
+    } finally {
+      if (operationHeartbeat) await operationHeartbeat.stop();
+      if (claimHeartbeat) await claimHeartbeat.stop();
+      if (recoveryPath) await this.#removeUniquePath(recoveryPath);
+      await this.#removeUniquePath(claimPath);
+    }
+  }
+
+  async #readSnapshot(directory) {
+    let directoryStat;
+    try {
+      directoryStat = await stat(directory);
     } catch (error) {
-      if (error?.code === "ENOENT") return true;
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    }
+    const operationOwnerPath = path.join(directory, "operation-owner.json");
+    try {
+      const [serialized, ownerStat] = await Promise.all([
+        readFile(operationOwnerPath, "utf8"),
+        stat(operationOwnerPath),
+      ]);
+      const owner = parseOwner(serialized);
+      return {
+        owner,
+        heartbeatMs: ownerStat.mtimeMs,
+        identity: `${directoryStat.dev}-${directoryStat.ino}-operation-${owner?.token ?? "invalid"}`,
+        key: owner?.token ?? `${directoryStat.dev}-${directoryStat.ino}`,
+      };
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+
+    const ownerPath = path.join(directory, "owner.json");
+    try {
+      const [serialized, ownerStat] = await Promise.all([readFile(ownerPath, "utf8"), stat(ownerPath)]);
+      const owner = parseOwner(serialized);
+      return {
+        owner,
+        heartbeatMs: ownerStat.mtimeMs,
+        identity: `${directoryStat.dev}-${directoryStat.ino}-${owner?.token ?? "invalid"}`,
+        key: owner?.token ?? `${directoryStat.dev}-${directoryStat.ino}`,
+      };
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    return {
+      owner: null,
+      heartbeatMs: directoryStat.mtimeMs,
+      identity: `${directoryStat.dev}-${directoryStat.ino}-incomplete`,
+      key: `${directoryStat.dev}-${directoryStat.ino}`,
+    };
+  }
+
+  #isStale(snapshot) {
+    return Date.now() - snapshot.heartbeatMs >= this.#staleLockMs;
+  }
+
+  async #readOwner(directory) {
+    try {
+      return parseOwner(await readFile(path.join(directory, "owner.json"), "utf8"));
+    } catch (error) {
+      if (error?.code === "ENOENT") return null;
       throw error;
     }
   }
 
-  async #finishRecovery() {
-    let recoveryStat;
-    try {
-      recoveryStat = await stat(this.#recoveryPath);
-    } catch (error) {
-      if (error?.code === "ENOENT") return;
-      throw error;
-    }
-
-    let lockStat;
-    try {
-      lockStat = await stat(this.#lockPath);
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-      await this.#cleanupRecoveryOwner();
-      await this.#unlinkIfPresent(this.#recoveryPath);
-      return;
-    }
-
-    if (lockStat.dev !== recoveryStat.dev || lockStat.ino !== recoveryStat.ino) {
-      await this.#cleanupRecoveryOwner();
-      await this.#unlinkIfPresent(this.#recoveryPath);
-      return;
-    }
-
-    const serialized = await readFile(this.#recoveryPath, "utf8");
-    if (!this.#isRecoverable(serialized, recoveryStat.mtimeMs)) return;
-    await this.#unlinkIfPresent(this.#lockPath);
-    await this.#cleanupRecoveryOwner(serialized);
-    await this.#unlinkIfPresent(this.#recoveryPath);
+  async #writeOperationOwner(directory) {
+    const token = randomUUID();
+    const temporaryOwnerPath = path.join(directory, `operation-owner-${token}.json`);
+    await writeFile(temporaryOwnerPath, JSON.stringify({
+      version: 1,
+      pid: process.pid,
+      token,
+      created_at_ms: Date.now(),
+    }), { encoding: "utf8", flag: "wx", mode: 0o600 });
+    await rename(temporaryOwnerPath, path.join(directory, "operation-owner.json"));
+    return token;
   }
 
-  #isRecoverable(serialized, modifiedAtMs) {
-    const owner = parseLockOwner(serialized);
-    if (owner) return !ownerIsAlive(owner.pid);
-    return Date.now() - modifiedAtMs >= this.#invalidLockStaleMs;
+  async #cleanupStaleOrphans() {
+    const base = path.basename(this.#lockDirectory);
+    const entries = await readdir(this.dataDirectory);
+    for (const entry of entries) {
+      if (!entry.startsWith(`${base}.`)) continue;
+      const candidate = path.join(this.dataDirectory, entry);
+      const isClaim = entry.startsWith(`${base}.recover-`) && entry.endsWith(".claim");
+      const isUniqueDirectory = entry.startsWith(`${base}.recovery-`)
+        || entry.startsWith(`${base}.release-`);
+      if (!isClaim && !isUniqueDirectory) continue;
+      const snapshot = await this.#readSnapshot(candidate);
+      if (snapshot && this.#isStale(snapshot)) await this.#removeUniquePath(candidate);
+    }
   }
 
-  async #cleanupRecoveryOwner(knownSerialized) {
-    let serialized = knownSerialized;
+  async #removeUniquePath(uniquePath) {
     try {
-      if (serialized === undefined) serialized = await readFile(this.#recoveryPath, "utf8");
-    } catch (error) {
-      if (error?.code === "ENOENT") return;
-      throw error;
-    }
-    const owner = parseLockOwner(serialized);
-    if (!owner) return;
-    const candidatePath = `${this.#lockPath}.${owner.token}.owner`;
-    try {
-      if (await readFile(candidatePath, "utf8") === serialized) await unlink(candidatePath);
+      await rm(uniquePath, { recursive: true, force: false });
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
     }
   }
 
-  async #unlinkIfPresent(filePath) {
-    try {
-      await unlink(filePath);
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-    }
+  async #callHook(name, context = {}) {
+    const hook = this.#testHooks?.[name];
+    if (typeof hook === "function") await hook(context);
   }
 
   async #write(state) {

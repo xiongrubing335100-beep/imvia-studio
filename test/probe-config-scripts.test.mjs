@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   copyFile,
   mkdir,
@@ -125,6 +126,24 @@ test("credential helper binds each write function to its exact fixed Keychain ma
   assert.doesNotMatch(secretBody, /accessKeyAccount/);
 });
 
+test("credential helper reviewed bytes require a separate security review before fingerprint updates", async () => {
+  const reviewedBytes = await readFile(credentialScript);
+  const reviewedSha256 = "137fc6674246aa624466b1a9ba1403ffaf6b82f8cca6b1111a5a642a67a010bd";
+  const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
+  assert.equal(sha256(reviewedBytes), reviewedSha256);
+  for (const mutation of [
+    "\nputs(\"fixed\")\n",
+    "\nfgets(nil, 0, nil)\n",
+    "\nsystem(\"true\")\n",
+    "\nposix_spawn(nil, nil, nil, nil, nil, nil)\n",
+    "\nLogger ().info(\"fixed\")\n",
+    "\n// mutate a fixed Keychain query after construction\n",
+  ]) {
+    assert.notEqual(sha256(Buffer.concat([reviewedBytes, Buffer.from(mutation)])), reviewedSha256, mutation);
+  }
+});
+
 test("credential helper rejects empty values and clears protected fields and temporary data", async () => {
   const source = await readFile(credentialScript, "utf8");
 
@@ -244,14 +263,17 @@ test("flag command keeps state permissions private and has no credential or netw
   const source = await readFile(flagScript, "utf8");
   const imports = [...source.matchAll(/^import[^\n]*from\s+["']([^"']+)["'];?$/gm)].map((match) => match[1]);
   assert.deepEqual(imports.sort(), [
+    "../src/probe/authorization-service.js",
     "../src/probe/probe-store.js",
     "node:path",
     "node:url",
   ].sort());
   assert.doesNotMatch(source, /keychain|transport|child|mcp|https?:|fetch\s*\(|exec|spawn/i);
+  assert.match(source, /createProbeAuthorizationService/);
+  assert.match(source, /setEnabledForUserCommand/);
   assert.match(source, /probeStore\.update/);
-  assert.match(source, /state\.enabled\s*=/);
-  assert.doesNotMatch(source, /audit_events|authorizations|attempts|results/);
+  assert.match(source, /structuredClone\(state\.audit_events\)/);
+  assert.match(source, /state\.audit_events\s*=\s*auditEvents/);
 
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-probe-mode-"));
   const { stdout, stderr } = await runFlag("enable", dataDirectory);
