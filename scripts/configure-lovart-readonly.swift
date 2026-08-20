@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Security
 
 let keychainService = "ai.imvia.studio.lovart-readonly"
@@ -80,7 +81,10 @@ if response == .alertFirstButtonReturn,
     accessData.resetBytes(in: accessData.startIndex..<accessData.endIndex)
     accessField.stringValue = ""
 
-    let secretStored = storeSecretKey(secretData)
+    var secretStored = false
+    if accessStored {
+        secretStored = storeSecretKey(secretData)
+    }
     secretData.resetBytes(in: secretData.startIndex..<secretData.endIndex)
     secretField.stringValue = ""
 
@@ -92,6 +96,8 @@ secretField.stringValue = ""
 
 if succeeded {
     print("Lovart read-only credentials saved.")
+    exit(EXIT_SUCCESS)
 } else {
-    print("Lovart read-only credential configuration failed.")
+    print("Lovart read-only credential configuration failed. You may safely rerun this helper.")
+    exit(EXIT_FAILURE)
 }

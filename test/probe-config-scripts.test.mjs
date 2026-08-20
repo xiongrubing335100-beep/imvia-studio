@@ -27,6 +27,19 @@ function commandEnvironment(dataDirectory) {
   return environment;
 }
 
+function swiftFunctionBody(source, name) {
+  const start = source.indexOf(`func ${name}`);
+  assert.notEqual(start, -1, name);
+  const openingBrace = source.indexOf("{", start);
+  let depth = 0;
+  for (let index = openingBrace; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    if (source[index] === "}") depth -= 1;
+    if (depth === 0) return source.slice(openingBrace + 1, index);
+  }
+  assert.fail(`${name} has no closing brace`);
+}
+
 async function runFlag(argument, dataDirectory, script = flagScript) {
   const arguments_ = Array.isArray(argument) ? argument : [argument];
   return execute(process.execPath, [script, ...arguments_], {
@@ -56,7 +69,11 @@ test("credential helper uses protected GUI input and fixed Keychain items", asyn
 
   const forbidden = [
     "CommandLine.arguments",
+    "CommandLine",
+    "ProcessInfo.arguments",
+    "processInfo.arguments",
     "ProcessInfo.processInfo.environment",
+    "ProcessInfo",
     "getenv(",
     "readLine(",
     "standardInput",
@@ -71,13 +88,41 @@ test("credential helper uses protected GUI input and fixed Keychain items", asyn
     "NSTask",
     "/bin/sh",
     "/bin/zsh",
+    "NSLog",
+    "os_log",
+    "Logger(",
+    "debugPrint(",
+    "dump(",
+    "fatalError(",
+    "fputs(",
+    "fprintf(",
   ];
   for (const token of forbidden) assert.equal(source.includes(token), false, token);
   assert.doesNotMatch(source, /func\s+\w+\s*\([^)]*\b(?:service|account)\b/i);
   assert.equal((source.match(/SecItemCopyMatching\(query as CFDictionary, nil\)/g) ?? []).length, 2);
   assert.doesNotMatch(source, /kSecReturn(?:Data|Attributes|Ref|PersistentRef)/);
+  assert.deepEqual([...new Set(source.match(/\bSecItem[A-Za-z0-9_]+/g) ?? [])].sort(), [
+    "SecItemAdd",
+    "SecItemCopyMatching",
+    "SecItemUpdate",
+  ]);
   assert.doesNotMatch(source, /print\s*\([^"\n]/);
   assert.doesNotMatch(source, /print\s*\("[^"\n]*\\\(/);
+});
+
+test("credential helper binds each write function to its exact fixed Keychain mapping", async () => {
+  const source = await readFile(credentialScript, "utf8");
+  const accessBody = swiftFunctionBody(source, "storeAccessKey");
+  const secretBody = swiftFunctionBody(source, "storeSecretKey");
+
+  for (const body of [accessBody, secretBody]) {
+    assert.match(body, /kSecClass as String:\s*kSecClassGenericPassword/);
+    assert.match(body, /kSecAttrService as String:\s*keychainService/);
+  }
+  assert.match(accessBody, /kSecAttrAccount as String:\s*accessKeyAccount/);
+  assert.doesNotMatch(accessBody, /secretKeyAccount/);
+  assert.match(secretBody, /kSecAttrAccount as String:\s*secretKeyAccount/);
+  assert.doesNotMatch(secretBody, /accessKeyAccount/);
 });
 
 test("credential helper rejects empty values and clears protected fields and temporary data", async () => {
@@ -92,9 +137,12 @@ test("credential helper rejects empty values and clears protected fields and tem
   const printCalls = [...source.matchAll(/print\s*\(([^\n]*)\)/g)].map((match) => match[1].trim());
   assert.deepEqual(printCalls, [
     '"Lovart read-only credentials saved."',
-    '"Lovart read-only credential configuration failed."',
+    '"Lovart read-only credential configuration failed. You may safely rerun this helper."',
   ]);
   assert.ok(printCalls.every((argument) => /^"[^"\\]*"$/.test(argument)), printCalls.join("\n"));
+  assert.match(source, /if accessStored\s*\{\s*secretStored\s*=\s*storeSecretKey\(secretData\)\s*\}/);
+  assert.match(source, /exit\(EXIT_SUCCESS\)/);
+  assert.match(source, /exit\(EXIT_FAILURE\)/);
 });
 
 test("flag command creates disabled-by-default state and toggles enabled only", async () => {
@@ -196,13 +244,14 @@ test("flag command keeps state permissions private and has no credential or netw
   const source = await readFile(flagScript, "utf8");
   const imports = [...source.matchAll(/^import[^\n]*from\s+["']([^"']+)["'];?$/gm)].map((match) => match[1]);
   assert.deepEqual(imports.sort(), [
-    "../src/probe/authorization-service.js",
     "../src/probe/probe-store.js",
     "node:path",
     "node:url",
   ].sort());
   assert.doesNotMatch(source, /keychain|transport|child|mcp|https?:|fetch\s*\(|exec|spawn/i);
-  assert.match(source, /setEnabledForUserCommand/);
+  assert.match(source, /probeStore\.update/);
+  assert.match(source, /state\.enabled\s*=/);
+  assert.doesNotMatch(source, /audit_events|authorizations|attempts|results/);
 
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-probe-mode-"));
   const { stdout, stderr } = await runFlag("enable", dataDirectory);
