@@ -6,12 +6,12 @@ import { fileURLToPath } from "node:url";
 
 const checkoutDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const worktreesDirectory = path.dirname(checkoutDirectory);
-const packageDirectory = path.basename(worktreesDirectory) === ".worktrees"
+const protectedLayoutAnchor = path.basename(worktreesDirectory) === ".worktrees"
   ? path.dirname(worktreesDirectory)
   : checkoutDirectory;
 const protectedBaseCandidates = [
-  path.dirname(packageDirectory),
-  path.join(path.dirname(packageDirectory), "lovart插件"),
+  path.dirname(protectedLayoutAnchor),
+  path.join(path.dirname(protectedLayoutAnchor), "lovart插件"),
 ];
 
 function usage() {
@@ -160,7 +160,7 @@ function compare(expected, actual) {
 async function main() {
   const [mode, manifestArgument] = process.argv.slice(2);
   if (!mode || !manifestArgument || !["snapshot", "verify"].includes(mode)) usage();
-  const manifestPath = path.resolve(packageDirectory, manifestArgument);
+  const manifestPath = path.resolve(checkoutDirectory, manifestArgument);
   const existing = validateManifest(JSON.parse(await readFile(manifestPath, "utf8")));
   const protectedBase = await selectProtectedBase(existing.roots);
   if (mode === "snapshot") {

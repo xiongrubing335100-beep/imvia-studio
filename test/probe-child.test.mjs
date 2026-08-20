@@ -440,11 +440,33 @@ test("runner reconstructs a valid stable child error without trusting child obje
 });
 
 test("runner rejects malformed, multiple, or marker-bearing envelopes without echoing output", async () => {
+  const localOnlyIndex = validSummary.workbench_models.findIndex(({ name }) => name === "Seedance 2.0 VIP");
+  const mappedIndex = validSummary.workbench_models.findIndex(({ name }) => name === "Seedance 2.5");
   const outputs = [
     "not-json " + RAW_MARKER,
     `${successEnvelope}\n${successEnvelope}`,
     JSON.stringify({ ok: true, result: { ...validSummary, identifier: RAW_MARKER } }),
     JSON.stringify({ ok: true, result: { ...validSummary, checked_at: "not-a-date" } }),
+    JSON.stringify({ ok: true, result: { ...validSummary, expires_at: "2026-08-20T03:00:00.000Z" } }),
+    JSON.stringify({ ok: true, result: { ...validSummary, capability_status: "unknown" } }),
+    JSON.stringify({
+      ok: true,
+      result: {
+        ...validSummary,
+        workbench_models: validSummary.workbench_models.map((row, index) => index === localOnlyIndex
+          ? { ...row, availability: "available" }
+          : { ...row }),
+      },
+    }),
+    JSON.stringify({
+      ok: true,
+      result: {
+        ...validSummary,
+        workbench_models: validSummary.workbench_models.map((row, index) => index === mappedIndex
+          ? { ...row, availability: "unknown" }
+          : { ...row }),
+      },
+    }),
     JSON.stringify({ ok: true, result: { ...validSummary, workbench_models: [] } }),
     JSON.stringify({ ok: true, result: validSummary, raw: RAW_MARKER }),
     JSON.stringify({ ok: false, error: { code: "AUTHENTICATION_FAILED", message: SECRET_MARKER } }),

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { DomainError } from "../src/domain/errors.js";
 import { createProbeAuthorizationService } from "../src/probe/authorization-service.js";
-import { PROBE_POLICY_VERSION } from "../src/probe/constants.js";
+import { normalizeLovartCapabilities } from "../src/probe/capability-normalizer.js";
 import { createLovartProbeService } from "../src/probe/probe-service.js";
 import { createProbeStore } from "../src/probe/probe-store.js";
 
@@ -18,32 +18,13 @@ const validAuthorizationInput = {
   idempotency_key: "auth-1",
 };
 
-const sampleSummary = {
-  reachable: true,
-  authenticated: true,
-  service_version: null,
-  capability_status: "available",
-  workbench_models: [
-    { name: "Seedance 2.5", mode: "video", availability: "available" },
-    { name: "Seedance 2.0 VIP", mode: "video", availability: "available" },
-    { name: "Seedance 2.0 Fast", mode: "video", availability: "available" },
-    { name: "Minimax H3", mode: "video", availability: "available" },
-    { name: "Kling 3.0", mode: "video", availability: "available" },
-    { name: "Kling 3.0 Omni", mode: "video", availability: "available" },
-    { name: "Seedream 4.0", mode: "image", availability: "available" },
-    { name: "Seedream 3.0", mode: "image", availability: "available" },
-    { name: "Seedream 3.0 Fast", mode: "image", availability: "available" },
-    { name: "Image 2", mode: "image", availability: "available" },
-    { name: "Nano Banana Pro", mode: "image", availability: "available" },
-    { name: "Nano Banana 2", mode: "image", availability: "available" },
-    { name: "Seedream 5.0", mode: "image", availability: "available" },
-    { name: "Seedream 5.0 Lite", mode: "image", availability: "available" },
-    { name: "Midjourney", mode: "image", availability: "available" },
-  ],
-  checked_at: "2026-08-20T00:00:01.000Z",
-  expires_at: "2026-08-20T00:05:01.000Z",
-  policy_version: PROBE_POLICY_VERSION,
-};
+const sampleSummary = normalizeLovartCapabilities({
+  unlimited: true,
+  available_models: {
+    IMAGE: ["generate_image_nano_banana_pro"],
+    VIDEO: ["generate_video_seedance_v2_5"],
+  },
+}, { checkedAtMs: START_MS + 1_000 });
 
 async function serviceFixture({ enabled = true, runner } = {}) {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-probe-service-"));
@@ -73,6 +54,40 @@ async function serviceFixture({ enabled = true, runner } = {}) {
     },
     service,
     store,
+    dataDirectory,
+  };
+}
+
+function persistedCompletedState(result = sampleSummary) {
+  return {
+    version: 1,
+    enabled: true,
+    authorizations: [{
+      id: "authorization-1",
+      kind: "lovart_capability_probe",
+      source: "user:current_session",
+      reason: "prior request",
+      policy_version: "lovart-readonly-probe-v1",
+      issued_at: "2026-08-20T00:00:00.000Z",
+      expires_at: "2026-08-20T00:02:00.000Z",
+      consumed_at: "2026-08-20T00:00:01.000Z",
+      idempotency_key: "authorization-key",
+    }],
+    attempts: [{
+      id: "attempt-1",
+      authorization_id: "authorization-1",
+      idempotency_key: "probe-key",
+      status: "completed",
+      started_at: "2026-08-20T00:00:01.000Z",
+      completed_at: "2026-08-20T00:00:02.000Z",
+      result,
+      error_code: null,
+    }],
+    audit_events: [
+      { type: "authorization_created", authorization_id: "authorization-1", at: "2026-08-20T00:00:00.000Z" },
+      { type: "probe_claimed", authorization_id: "authorization-1", attempt_id: "attempt-1", at: "2026-08-20T00:00:01.000Z" },
+      { type: "probe_completed", attempt_id: "attempt-1", at: "2026-08-20T00:00:02.000Z" },
+    ],
   };
 }
 
@@ -148,6 +163,53 @@ test("invalid authorization never launches the child", async () => {
   );
   assert.equal(fixture.childRuns, 0);
   assert.equal((await fixture.store.read()).attempts.length, 0);
+});
+
+test("corrupted probe state fails closed before any child, Keychain, or network boundary", async () => {
+  const corruptionCases = [
+    {
+      state: { ...persistedCompletedState(), extra_root: "POISON_ROOT" },
+      invoke: (service) => service.authorize(validAuthorizationInput),
+    },
+    {
+      state: { ...persistedCompletedState(), enabled: "false" },
+      invoke: (service) => service.authorize(validAuthorizationInput),
+    },
+    {
+      state: persistedCompletedState({ ...sampleSummary, extra_summary: "POISON_REPLAY" }),
+      invoke: (service) => service.probe({ authorization_id: "authorization-1", idempotency_key: "probe-key" }),
+    },
+    {
+      state: {
+        ...persistedCompletedState(),
+        attempts: [{
+          ...persistedCompletedState().attempts[0],
+          status: "failed",
+          result: null,
+          error_code: { code: "UPSTREAM_UNAVAILABLE", detail: "POISON_ERROR" },
+        }],
+        audit_events: [
+          ...persistedCompletedState().audit_events.slice(0, 2),
+          { type: "probe_failed", attempt_id: "attempt-1", code: "UPSTREAM_UNAVAILABLE", at: "2026-08-20T00:00:02.000Z" },
+        ],
+      },
+      invoke: (service) => service.probe({ authorization_id: "authorization-1", idempotency_key: "probe-key" }),
+    },
+  ];
+
+  for (const { state, invoke } of corruptionCases) {
+    const fixture = await serviceFixture();
+    await writeFile(fixture.store.statePath, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+    await assert.rejects(invoke(fixture.service), (error) => {
+      assert.ok(error instanceof DomainError);
+      assert.equal(error.code, "STORE_UNAVAILABLE");
+      assert.equal(error.message, "Lovart probe state is unavailable");
+      assert.deepEqual(error.details, {});
+      assert.equal(JSON.stringify(error).includes("POISON"), false);
+      return true;
+    });
+    assert.equal(fixture.childRuns, 0);
+  }
 });
 
 test("a claimed probe runs once and durably returns only an authenticated success", async () => {

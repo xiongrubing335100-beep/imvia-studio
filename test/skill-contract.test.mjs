@@ -33,6 +33,10 @@ test("skill fixes the Milestone 6 read-only probe authorization boundary", async
     "An idempotent completed replay must perform zero Keychain reads and zero Lovart requests.",
     "The probe is advisory and must not alter job, draft, artifact, cost, iteration, or execution behavior.",
     "Never upload, generate, confirm, query projects, threads, status, results, or balance; never expose AK/SK; and never call the existing Lovart plugin.",
+    "Codex must never run `pnpm run configure:lovart-readonly`, `pnpm run enable:lovart-readonly-probe`, or `pnpm run disable:lovart-readonly-probe` for the user.",
+    "If the probe is disabled, stop and ask the user to run the required setup or enable command themselves.",
+    "One explicit request in the current conversation permits exactly one fresh authorization and one probe attempt.",
+    "After any failure or consumed authorization, never change an idempotency key, re-authorize, or retry; stop and await a new explicit request in the current conversation.",
   ]) assert.ok(text.includes(phrase), `missing exact phrase: ${phrase}`);
 
   const milestone6 = text.indexOf("## Milestone 6 read-only Lovart probe");

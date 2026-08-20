@@ -220,6 +220,47 @@ test("relative manifests and protected roots resolve in both supported repositor
   }
 });
 
+test("a linked checkout owns its relative manifest while the main checkout anchors both protected layouts", async (context) => {
+  const sandbox = await mkdtemp(path.join(pluginRoot, ".protected-worktree-layout-test-"));
+  context.after(() => rm(sandbox, { recursive: true, force: true }));
+
+  for (const layout of ["sibling", "lovart-child"]) {
+    const layoutRoot = path.join(sandbox, layout);
+    const mainCheckout = path.join(layoutRoot, "imvia-studio");
+    const linkedCheckout = path.join(mainCheckout, ".worktrees", "review-branch");
+    const protectedBase = layout === "sibling" ? layoutRoot : path.join(layoutRoot, "lovart插件");
+    const root = "fixture-protected-root";
+    const contents = `${layout}-linked\n`;
+    await mkdir(path.join(linkedCheckout, "scripts"), { recursive: true });
+    await mkdir(path.join(linkedCheckout, "test"), { recursive: true });
+    await mkdir(path.join(protectedBase, root), { recursive: true });
+    await copyFile(verifier, path.join(linkedCheckout, "scripts/verify-protected-paths.mjs"));
+    await writeFile(path.join(protectedBase, root, "asset.txt"), contents);
+    await writeFile(path.join(linkedCheckout, "test/manifest.json"), JSON.stringify({
+      version: 1,
+      roots: [root],
+      files: [{
+        path: `${root}/asset.txt`,
+        type: "file",
+        size_bytes: Buffer.byteLength(contents),
+        sha256: createHash("sha256").update(contents).digest("hex"),
+      }],
+    }));
+    if (layout === "lovart-child") {
+      await mkdir(path.join(mainCheckout, "test"), { recursive: true });
+      await writeFile(path.join(mainCheckout, "test/manifest.json"), "not the linked manifest\n");
+    }
+
+    const verification = spawnSync(
+      process.execPath,
+      [path.join(linkedCheckout, "scripts/verify-protected-paths.mjs"), "verify", "test/manifest.json"],
+      { cwd: layoutRoot, encoding: "utf8" },
+    );
+    assert.equal(verification.status, 0, `${layout}: ${verification.stderr}`);
+    assert.match(verification.stdout, /Protected-path verification passed \(1 files\)/);
+  }
+});
+
 test("verifier rejects a manifest when neither exact protected base contains every root", async (context) => {
   const sandbox = await mkdtemp(path.join(pluginRoot, ".protected-missing-layout-test-"));
   context.after(() => rm(sandbox, { recursive: true, force: true }));

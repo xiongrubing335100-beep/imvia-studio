@@ -11,16 +11,20 @@ const probeDirectory = path.join(packageDirectory, "src/probe");
 const reviewedProductionHashes = Object.freeze({
   "scripts/configure-lovart-readonly.swift": "137fc6674246aa624466b1a9ba1403ffaf6b82f8cca6b1111a5a642a67a010bd",
   "scripts/set-lovart-readonly-probe.mjs": "fae16a18f93ab274b64053889b505c3c59e3404682c6a7266d55ae6372518b66",
+  "scripts/verify-protected-paths.mjs": "0ee549fff97831b338460570661e85cfb15ee6a5368c48b97256478f48fe0886",
+  "src/domain/model-capabilities.js": "53609d3eba84809c7988184b34a35aaf4ee790f9cffa6a80685477459d677b00",
   "src/persistence/json-store.js": "f269ef6d307d7501432bea9c8d46c0a22364709c3b09dc30d88fab794712e1a9",
-  "src/probe/authorization-service.js": "a3e2fb86a9aaad5a5d7bbdd829e8111cfd05f45df54804bcec4455bc04015a71",
+  "src/probe/authorization-service.js": "8b3eebe93d748599b14d4ab0415aa57ce6dbeed4a7626c5b09ac84de3f0bdd0c",
   "src/probe/capability-normalizer.js": "f3ee013051aa8db5367a61dc9c5bda38d543d8228c7fc044d62e48603e48fd09",
   "src/probe/child-core.js": "bbfd3b4676d81cdac39b35b0b6ebc5801fc3d1e712b4b2ccf99a9bf0df9c2939",
-  "src/probe/child-runner.js": "87c959ca5bedd8fa78cd2abefb61926ae3e76602d07da519193ccbcb1bf64470",
+  "src/probe/child-runner.js": "ae76a6190f27d06dc6b1bf2214397312102e7d9f4374bb548a08cdb89fa74b3c",
   "src/probe/child.js": "f3d45e816940c24fdcee0a00b0a33a569bebfdfe5f3fade81c85da3526c79914",
   "src/probe/constants.js": "eadff6620237d3ae968bea3eae15e702381029e7572b85e7c832f4e9f8ba71b9",
   "src/probe/keychain-provider.js": "203a5a5eea632b07a9911dcf83d1de0b371d14497f440d980f42c5e35f713c0f",
   "src/probe/probe-service.js": "6da41d3894a27a17ade4d128148d70fc74899fa8f4ebfedc822bc97866457986",
-  "src/probe/probe-store.js": "7dc68b8154dbf792ed03d1007d40f87203353250cda185009814a45cf13fe176",
+  "src/probe/probe-state-validator.js": "8b1a6545221a94842b4df710041475768ff8c24d295ef74057f05f9db46ce043",
+  "src/probe/probe-store.js": "aa20ffea69784749925fb51a1df36ab2124a916238a1595f79563f4a16e40637",
+  "src/probe/summary-validator.js": "728d94ed8bdd12b880fa73c59983e98f8076c17262b59c6b02f111b434edc982",
   "src/probe/transport.js": "eb14acf43af1d0a6d86936cb79b5f4acab5f908914eafc2dfaaff843a1ca2f34",
 });
 const reviewedNormalizedIndexHash = "8853818dea79ce0c6144a786180e998aa0596427fb1435df05bffe3f8d2cb49a";
@@ -28,6 +32,8 @@ const reviewedNormalizedIndexHash = "8853818dea79ce0c6144a786180e998aa0596427fb1
 const reviewedImports = Object.freeze({
   "scripts/configure-lovart-readonly.swift": ["AppKit", "Darwin", "Security"],
   "scripts/set-lovart-readonly-probe.mjs": ["../src/probe/authorization-service.js", "../src/probe/probe-store.js", "node:path", "node:url"],
+  "scripts/verify-protected-paths.mjs": ["node:crypto", "node:fs/promises", "node:path", "node:url"],
+  "src/domain/model-capabilities.js": [],
   "src/index.js": [
     "./domain/timestamps.js", "./domain/workbench-service.js", "./http/server.js",
     "./probe/authorization-service.js", "./probe/child-runner.js", "./probe/probe-service.js",
@@ -35,15 +41,17 @@ const reviewedImports = Object.freeze({
     "@modelcontextprotocol/sdk/server/stdio.js", "node:path", "node:url", "zod",
   ],
   "src/persistence/json-store.js": ["node:crypto", "node:fs/promises", "node:path", "node:timers/promises"],
-  "src/probe/authorization-service.js": ["../domain/errors.js", "../domain/model-capabilities.js", "./constants.js", "node:crypto"],
+  "src/probe/authorization-service.js": ["../domain/errors.js", "./constants.js", "./summary-validator.js", "node:crypto"],
   "src/probe/capability-normalizer.js": ["../domain/errors.js", "../domain/model-capabilities.js", "./constants.js"],
   "src/probe/child-core.js": ["../domain/errors.js"],
-  "src/probe/child-runner.js": ["../domain/errors.js", "../domain/model-capabilities.js", "./constants.js", "node:child_process", "node:path", "node:url"],
+  "src/probe/child-runner.js": ["../domain/errors.js", "./summary-validator.js", "node:child_process", "node:path", "node:url"],
   "src/probe/child.js": ["./capability-normalizer.js", "./child-core.js", "./keychain-provider.js", "./transport.js"],
   "src/probe/constants.js": [],
   "src/probe/keychain-provider.js": ["../domain/errors.js", "./constants.js", "node:child_process"],
   "src/probe/probe-service.js": ["../domain/errors.js"],
-  "src/probe/probe-store.js": ["../persistence/json-store.js", "./constants.js"],
+  "src/probe/probe-state-validator.js": ["../domain/errors.js", "./constants.js", "./summary-validator.js"],
+  "src/probe/probe-store.js": ["../persistence/json-store.js", "./constants.js", "./probe-state-validator.js"],
+  "src/probe/summary-validator.js": ["../domain/errors.js", "../domain/model-capabilities.js", "./capability-normalizer.js", "./constants.js"],
   "src/probe/transport.js": ["../domain/errors.js", "./constants.js", "node:crypto", "node:https"],
 });
 
@@ -217,7 +225,7 @@ function auditProductionSource(sourcePath, source, { enforceImports = true } = {
   }
 
   if (/\b(?:writeFile|appendFile|rename|rm|unlink|mkdir)\s*\(/.test(code)
-    && sourcePath !== "src/persistence/json-store.js") {
+    && !["scripts/verify-protected-paths.mjs", "src/persistence/json-store.js"].includes(sourcePath)) {
     violations.push("filesystem write outside JsonStore");
   }
 
@@ -271,6 +279,18 @@ test("every production security-boundary file matches its reviewed digest", asyn
   const sources = await readNamedSources(Object.keys(reviewedProductionHashes));
   for (const { path: sourcePath, source } of sources) {
     assert.equal(sha256(source), reviewedProductionHashes[sourcePath], `${sourcePath} changed; require a separate security review`);
+  }
+});
+
+test("security inventory covers the model table, strict validators, and protected verifier", () => {
+  for (const sourcePath of [
+    "scripts/verify-protected-paths.mjs",
+    "src/domain/model-capabilities.js",
+    "src/probe/probe-state-validator.js",
+    "src/probe/summary-validator.js",
+  ]) {
+    assert.equal(Object.hasOwn(reviewedProductionHashes, sourcePath), true, `${sourcePath} hash`);
+    assert.equal(Object.hasOwn(reviewedImports, sourcePath), true, `${sourcePath} imports`);
   }
 });
 

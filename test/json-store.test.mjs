@@ -64,7 +64,11 @@ function spawnBlockedProbeUpdate(dataDirectory, mutation) {
     });
     const mutation = JSON.parse(process.env.TEST_MUTATION);
     await store.update(async (state) => {
-      if (mutation.server_revision !== undefined) state.server_revision = mutation.server_revision;
+      if (mutation.authorization) state.authorizations.push(mutation.authorization);
+      if (mutation.consume_authorization) {
+        const authorization = state.authorizations.find(({ id }) => id === mutation.consume_authorization.id);
+        authorization.consumed_at = mutation.consume_authorization.at;
+      }
       if (mutation.attempt) state.attempts.push(mutation.attempt);
       if (mutation.audit) state.audit_events.push(mutation.audit);
       await writeFile(process.env.TEST_READY_PATH, "ready", { mode: 0o600 });
@@ -144,14 +148,30 @@ test("JsonStore supports an isolated state filename with private permissions", a
 
 test("a real CLI waiter enters contention before disable and preserves the server update", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "imvia-json-store-race-"));
+  const authorization = {
+    id: "authorization-1",
+    kind: "lovart_capability_probe",
+    source: "user:current_session",
+    reason: "concurrent request",
+    policy_version: "lovart-readonly-probe-v1",
+    issued_at: "2026-08-20T00:00:01.000Z",
+    expires_at: "2026-08-20T00:02:01.000Z",
+    consumed_at: null,
+    idempotency_key: "authorization-key",
+  };
+  const audit = {
+    type: "authorization_created",
+    authorization_id: "authorization-1",
+    at: "2026-08-20T00:00:01.000Z",
+  };
   await seedProbeState(dir, {
     version: 1,
     enabled: true,
     authorizations: [],
     attempts: [],
-    audit_events: [{ type: "existing" }],
+    audit_events: [{ type: "probe_enabled", at: "2026-08-20T00:00:00.000Z" }],
   });
-  const worker = spawnBlockedProbeUpdate(dir, { server_revision: 2 });
+  const worker = spawnBlockedProbeUpdate(dir, { authorization, audit });
   await waitForPath(worker.readyPath);
   const cli = spawnFlag(dir, "disable");
   let markerPath;
@@ -170,10 +190,12 @@ test("a real CLI waiter enters contention before disable and preserves the serve
     assert.deepEqual(JSON.parse(await readFile(path.join(dir, probeStateFile), "utf8")), {
       version: 1,
       enabled: false,
-      authorizations: [],
+      authorizations: [authorization],
       attempts: [],
-      audit_events: [{ type: "existing" }],
-      server_revision: 2,
+      audit_events: [
+        { type: "probe_enabled", at: "2026-08-20T00:00:00.000Z" },
+        audit,
+      ],
     });
     await assert.rejects(access(markerPath), { code: "ENOENT" });
     assert.deepEqual(await lockArtifacts(dir, probeStateFile), []);
@@ -188,14 +210,46 @@ test("a concurrent attempt and audit write are retained when the CLI toggles", a
   const initial = {
     version: 1,
     enabled: true,
-    authorizations: [{ id: "authorization-1" }],
+    authorizations: [{
+      id: "authorization-1",
+      kind: "lovart_capability_probe",
+      source: "user:current_session",
+      reason: "concurrent request",
+      policy_version: "lovart-readonly-probe-v1",
+      issued_at: "2026-08-20T00:00:00.000Z",
+      expires_at: "2026-08-20T00:02:00.000Z",
+      consumed_at: null,
+      idempotency_key: "authorization-key",
+    }],
     attempts: [],
-    audit_events: [{ type: "authorization_created" }],
+    audit_events: [{
+      type: "authorization_created",
+      authorization_id: "authorization-1",
+      at: "2026-08-20T00:00:00.000Z",
+    }],
   };
   await seedProbeState(dir, initial);
-  const attempt = { id: "attempt-1", status: "pending" };
-  const audit = { type: "probe_claimed", attempt_id: "attempt-1" };
-  const worker = spawnBlockedProbeUpdate(dir, { attempt, audit });
+  const attempt = {
+    id: "attempt-1",
+    authorization_id: "authorization-1",
+    idempotency_key: "attempt-key",
+    status: "pending",
+    started_at: "2026-08-20T00:00:01.000Z",
+    completed_at: null,
+    result: null,
+    error_code: null,
+  };
+  const audit = {
+    type: "probe_claimed",
+    authorization_id: "authorization-1",
+    attempt_id: "attempt-1",
+    at: "2026-08-20T00:00:01.000Z",
+  };
+  const worker = spawnBlockedProbeUpdate(dir, {
+    consume_authorization: { id: "authorization-1", at: "2026-08-20T00:00:01.000Z" },
+    attempt,
+    audit,
+  });
   await waitForPath(worker.readyPath);
   const cli = spawnFlag(dir, "disable");
   try {
@@ -208,6 +262,7 @@ test("a concurrent attempt and audit write are retained when the CLI toggles", a
     assert.deepEqual(JSON.parse(await readFile(path.join(dir, probeStateFile), "utf8")), {
       ...initial,
       enabled: false,
+      authorizations: [{ ...initial.authorizations[0], consumed_at: "2026-08-20T00:00:01.000Z" }],
       attempts: [attempt],
       audit_events: [...initial.audit_events, audit],
     });

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
-import { MODEL_CAPABILITIES } from "../domain/model-capabilities.js";
 import { PROBE_AUTHORIZATION_TTL_MS, PROBE_POLICY_VERSION } from "./constants.js";
+import { copyValidatedProbeSummary } from "./summary-validator.js";
 
 function requireNonEmpty(value, field) {
   if (typeof value !== "string" || value.trim() === "") {
@@ -16,7 +16,6 @@ const STABLE_PROBE_ERRORS = new Set([
   "UPSTREAM_RATE_LIMITED", "UPSTREAM_UNAVAILABLE",
   "UPSTREAM_SCHEMA_UNRECOGNIZED", "STORE_UNAVAILABLE",
 ]);
-const CANONICAL_UTC = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{3}Z$/;
 
 function authorizationOutput(record) {
   return {
@@ -33,33 +32,6 @@ function requireStableProbeErrorCode(code) {
   return code;
 }
 
-function copyValidatedProbeSummary(value) {
-  const canonical = (timestamp) => {
-    const milliseconds = typeof timestamp === "string" && CANONICAL_UTC.test(timestamp)
-      ? Date.parse(timestamp) : Number.NaN;
-    return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === timestamp;
-  };
-  const localRows = [...MODEL_CAPABILITIES];
-  const validRows = Array.isArray(value?.workbench_models)
-    && value.workbench_models.length === localRows.length
-    && value.workbench_models.every((row, index) => row
-      && row.name === localRows[index][0] && row.mode === localRows[index][1].mode
-      && ["available", "unavailable", "unknown"].includes(row.availability));
-  if (value?.reachable !== true || value?.authenticated !== true || value?.service_version !== null
-    || !["available", "unknown"].includes(value?.capability_status) || !validRows
-    || !canonical(value?.checked_at) || !canonical(value?.expires_at)
-    || value?.policy_version !== PROBE_POLICY_VERSION) {
-    throw new DomainError("UPSTREAM_SCHEMA_UNRECOGNIZED", "normalized probe summary was invalid");
-  }
-  return {
-    reachable: true, authenticated: true, service_version: null,
-    capability_status: value.capability_status,
-    workbench_models: value.workbench_models.map(({ name, mode, availability }) => ({ name, mode, availability })),
-    checked_at: value.checked_at, expires_at: value.expires_at,
-    policy_version: PROBE_POLICY_VERSION,
-  };
-}
-
 export function createProbeAuthorizationService({ store, now = Date.now, randomId = randomUUID }) {
   return {
     async authorize(input) {
@@ -69,7 +41,7 @@ export function createProbeAuthorizationService({ store, now = Date.now, randomI
       const reason = requireNonEmpty(input.reason, "reason");
       const idempotencyKey = requireNonEmpty(input.idempotency_key, "idempotency_key");
       return store.update((state) => {
-        if (!state.enabled) throw new DomainError("PROBE_DISABLED", "Lovart read-only probe is disabled");
+        if (state.enabled !== true) throw new DomainError("PROBE_DISABLED", "Lovart read-only probe is disabled");
         const existing = state.authorizations.find((record) => record.idempotency_key === idempotencyKey);
         if (existing) {
           if (existing.source !== input.source || existing.reason !== reason) {
@@ -95,11 +67,13 @@ export function createProbeAuthorizationService({ store, now = Date.now, randomI
       const authorizationId = requireNonEmpty(input?.authorization_id, "authorization_id");
       const idempotencyKey = requireNonEmpty(input?.idempotency_key, "idempotency_key");
       return store.update((state) => {
-        if (!state.enabled) throw new DomainError("PROBE_DISABLED", "Lovart read-only probe is disabled");
+        if (state.enabled !== true) throw new DomainError("PROBE_DISABLED", "Lovart read-only probe is disabled");
         const replay = state.attempts.find(
           (attempt) => attempt.authorization_id === authorizationId && attempt.idempotency_key === idempotencyKey,
         );
-        if (replay?.status === "completed") return { kind: "replay", result: replay.result };
+        if (replay?.status === "completed") {
+          return { kind: "replay", result: copyValidatedProbeSummary(replay.result) };
+        }
         if (replay) throw new DomainError("PROBE_AUTHORIZATION_INVALID", "probe attempt is already consumed");
         const authorization = state.authorizations.find((record) => record.id === authorizationId);
         const claimedAtMs = now();

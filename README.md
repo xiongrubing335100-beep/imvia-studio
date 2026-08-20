@@ -215,11 +215,12 @@ installation, does not authorize a live probe or generation and does not
 authorize either user-run setup/enable command.
 
 The protected-path baseline belongs to the original development workspace.
-From that explicit workspace root, where all three protected roots exist, run:
+From the independent IMVIA repository root, where the verifier can resolve all
+three protected roots through one of its two supported layouts, run:
 
 ```sh
-cd /absolute/path/to/original-development-workspace
-node imvia-studio/scripts/verify-protected-paths.mjs verify imvia-studio/test/protected-paths.manifest.json
+cd /absolute/path/to/imvia-studio
+pnpm run verify:protected-paths
 ```
 
 The read-only verifier covers `lovart-codex-plugin`,

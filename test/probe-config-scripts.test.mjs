@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
+import { normalizeLovartCapabilities } from "../src/probe/capability-normalizer.js";
 
 const execute = promisify(execFile);
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
@@ -189,34 +190,72 @@ test("flag command creates disabled-by-default state and toggles enabled only", 
 test("flag command preserves rich probe state byte-for-byte except enabled", async () => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-probe-rich-"));
   await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
+  const summary = normalizeLovartCapabilities({
+    unlimited: true,
+    available_models: { IMAGE: [], VIDEO: ["generate_video_seedance_v2_5"] },
+  }, { checkedAtMs: Date.parse("2026-08-20T00:00:01.000Z") });
+  const authorization = (id, issuedAt, consumedAt = null) => ({
+    id,
+    kind: "lovart_capability_probe",
+    source: "user:current_session",
+    reason: `prior request ${id}`,
+    policy_version: "lovart-readonly-probe-v1",
+    issued_at: issuedAt,
+    expires_at: new Date(Date.parse(issuedAt) + 120_000).toISOString(),
+    consumed_at: consumedAt,
+    idempotency_key: `${id}-key`,
+  });
   const original = {
     version: 1,
     enabled: false,
-    authorizations: [{
-      id: "authorization-1",
-      kind: "lovart_capability_probe",
-      source: "user:current_session",
-      reason: "prior request",
-      policy_version: "lovart-readonly-probe-v1",
-      issued_at: "2026-08-20T00:00:00.000Z",
-      expires_at: "2026-08-20T00:02:00.000Z",
-      consumed_at: "2026-08-20T00:00:01.000Z",
-      idempotency_key: "authorization-key",
-    }],
-    attempts: [{
-      id: "attempt-1",
-      authorization_id: "authorization-1",
-      idempotency_key: "attempt-key",
-      status: "completed",
-      started_at: "2026-08-20T00:00:01.000Z",
-      completed_at: "2026-08-20T00:00:02.000Z",
-      result: { reachable: true, authenticated: true, service_version: null },
-      error_code: null,
-    }],
-    results: [{ status: "stale", checked_at: "2026-08-20T00:00:02.000Z" }],
+    authorizations: [
+      authorization("authorization-completed", "2026-08-20T00:00:00.000Z", "2026-08-20T00:00:01.000Z"),
+      authorization("authorization-failed", "2026-08-20T00:01:00.000Z", "2026-08-20T00:01:01.000Z"),
+      authorization("authorization-pending", "2026-08-20T00:02:00.000Z", "2026-08-20T00:02:01.000Z"),
+      authorization("authorization-unused", "2026-08-20T00:03:00.000Z"),
+    ],
+    attempts: [
+      {
+        id: "attempt-completed",
+        authorization_id: "authorization-completed",
+        idempotency_key: "attempt-completed-key",
+        status: "completed",
+        started_at: "2026-08-20T00:00:01.000Z",
+        completed_at: "2026-08-20T00:00:02.000Z",
+        result: summary,
+        error_code: null,
+      },
+      {
+        id: "attempt-failed",
+        authorization_id: "authorization-failed",
+        idempotency_key: "attempt-failed-key",
+        status: "failed",
+        started_at: "2026-08-20T00:01:01.000Z",
+        completed_at: "2026-08-20T00:01:02.000Z",
+        result: null,
+        error_code: "UPSTREAM_UNAVAILABLE",
+      },
+      {
+        id: "attempt-pending",
+        authorization_id: "authorization-pending",
+        idempotency_key: "attempt-pending-key",
+        status: "pending",
+        started_at: "2026-08-20T00:02:01.000Z",
+        completed_at: null,
+        result: null,
+        error_code: null,
+      },
+    ],
     audit_events: [
-      { type: "authorization_created", authorization_id: "authorization-1", at: "2026-08-20T00:00:00.000Z" },
-      { type: "probe_completed", attempt_id: "attempt-1", at: "2026-08-20T00:00:02.000Z" },
+      { type: "authorization_created", authorization_id: "authorization-completed", at: "2026-08-20T00:00:00.000Z" },
+      { type: "probe_claimed", authorization_id: "authorization-completed", attempt_id: "attempt-completed", at: "2026-08-20T00:00:01.000Z" },
+      { type: "probe_completed", attempt_id: "attempt-completed", at: "2026-08-20T00:00:02.000Z" },
+      { type: "authorization_created", authorization_id: "authorization-failed", at: "2026-08-20T00:01:00.000Z" },
+      { type: "probe_claimed", authorization_id: "authorization-failed", attempt_id: "attempt-failed", at: "2026-08-20T00:01:01.000Z" },
+      { type: "probe_failed", attempt_id: "attempt-failed", code: "UPSTREAM_UNAVAILABLE", at: "2026-08-20T00:01:02.000Z" },
+      { type: "authorization_created", authorization_id: "authorization-pending", at: "2026-08-20T00:02:00.000Z" },
+      { type: "probe_claimed", authorization_id: "authorization-pending", attempt_id: "attempt-pending", at: "2026-08-20T00:02:01.000Z" },
+      { type: "authorization_created", authorization_id: "authorization-unused", at: "2026-08-20T00:03:00.000Z" },
     ],
   };
   const statePath = path.join(dataDirectory, stateFileName);

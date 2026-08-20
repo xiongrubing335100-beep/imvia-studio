@@ -37,6 +37,10 @@ On revision/status conflict, unknown response, missing mock adapter, or failed c
 
 The user must explicitly request the read-only probe in the current conversation. General permission, a queued job, earlier approval, or a fixture decision is insufficient. Call `imvia_authorize_lovart_probe` before `imvia_probe_lovart_capabilities`.
 
+Codex must never run `pnpm run configure:lovart-readonly`, `pnpm run enable:lovart-readonly-probe`, or `pnpm run disable:lovart-readonly-probe` for the user. If the probe is disabled, stop and ask the user to run the required setup or enable command themselves.
+
+One explicit request in the current conversation permits exactly one fresh authorization and one probe attempt. After any failure or consumed authorization, never change an idempotency key, re-authorize, or retry; stop and await a new explicit request in the current conversation.
+
 Feature disabled, unsupported platform, invalid, expired, or consumed authorization, or a missing credential reference must produce zero Lovart requests. An idempotent completed replay must perform zero Keychain reads and zero Lovart requests.
 
 The probe is advisory and must not alter job, draft, artifact, cost, iteration, or execution behavior. Never upload, generate, confirm, query projects, threads, status, results, or balance; never expose AK/SK; and never call the existing Lovart plugin.

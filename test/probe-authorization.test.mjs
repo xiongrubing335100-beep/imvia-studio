@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createProbeAuthorizationService } from "../src/probe/authorization-service.js";
+import { normalizeLovartCapabilities } from "../src/probe/capability-normalizer.js";
 import { PROBE_AUTHORIZATION_TTL_MS, PROBE_POLICY_VERSION } from "../src/probe/constants.js";
 import { createProbeStore } from "../src/probe/probe-store.js";
 
@@ -15,32 +16,13 @@ const validAuthorizationInput = {
   idempotency_key: "auth-1",
 };
 
-const sampleSummary = {
-  reachable: true,
-  authenticated: true,
-  service_version: null,
-  capability_status: "available",
-  workbench_models: [
-    { name: "Seedance 2.5", mode: "video", availability: "available" },
-    { name: "Seedance 2.0 VIP", mode: "video", availability: "available" },
-    { name: "Seedance 2.0 Fast", mode: "video", availability: "available" },
-    { name: "Minimax H3", mode: "video", availability: "available" },
-    { name: "Kling 3.0", mode: "video", availability: "available" },
-    { name: "Kling 3.0 Omni", mode: "video", availability: "available" },
-    { name: "Seedream 4.0", mode: "image", availability: "available" },
-    { name: "Seedream 3.0", mode: "image", availability: "available" },
-    { name: "Seedream 3.0 Fast", mode: "image", availability: "available" },
-    { name: "Image 2", mode: "image", availability: "available" },
-    { name: "Nano Banana Pro", mode: "image", availability: "available" },
-    { name: "Nano Banana 2", mode: "image", availability: "available" },
-    { name: "Seedream 5.0", mode: "image", availability: "available" },
-    { name: "Seedream 5.0 Lite", mode: "image", availability: "available" },
-    { name: "Midjourney", mode: "image", availability: "available" },
-  ],
-  checked_at: "2026-08-20T00:00:01.000Z",
-  expires_at: "2026-08-20T00:05:01.000Z",
-  policy_version: PROBE_POLICY_VERSION,
-};
+const sampleSummary = normalizeLovartCapabilities({
+  unlimited: true,
+  available_models: {
+    IMAGE: ["generate_image_nano_banana_pro"],
+    VIDEO: ["generate_video_seedance_v2_5"],
+  },
+}, { checkedAtMs: START_MS + 1_000 });
 
 async function fixture({ enabled = false } = {}) {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-probe-authorization-"));
@@ -214,11 +196,7 @@ test("completed idempotency replay returns a copied stored summary without a new
   const authorization = await service.authorize(validAuthorizationInput);
   const claim = await service.beginProbe({ authorization_id: authorization.authorization_id, idempotency_key: "probe-1" });
   setNow(START_MS + 2_000);
-  const supplied = {
-    ...sampleSummary,
-    secret: "must not persist",
-    workbench_models: sampleSummary.workbench_models.map((row) => ({ ...row, upstream_id: "must not persist" })),
-  };
+  const supplied = structuredClone(sampleSummary);
   const completed = await service.completeProbe({ attempt_id: claim.attempt_id, result: supplied });
   supplied.workbench_models[0].availability = "unavailable";
   const replay = await service.beginProbe({ authorization_id: authorization.authorization_id, idempotency_key: "probe-1" });
@@ -229,6 +207,45 @@ test("completed idempotency replay returns a copied stored summary without a new
   assert.equal(state.attempts.length, 1);
   assert.deepEqual(state.attempts[0].result, sampleSummary);
   assert.equal(state.attempts[0].completed_at, "2026-08-20T00:00:02.000Z");
+});
+
+test("completion rejects every semantic widening of the normalized summary", async () => {
+  const { service, store } = await fixture({ enabled: true });
+  const authorization = await service.authorize(validAuthorizationInput);
+  const claim = await service.beginProbe({ authorization_id: authorization.authorization_id, idempotency_key: "probe-1" });
+  const localOnlyIndex = sampleSummary.workbench_models.findIndex(({ name }) => name === "Seedance 2.0 VIP");
+  const mappedIndex = sampleSummary.workbench_models.findIndex(({ name }) => name === "Seedance 2.5");
+  const badSummaries = [
+    {
+      ...sampleSummary,
+      workbench_models: sampleSummary.workbench_models.map((row, index) => index === localOnlyIndex
+        ? { ...row, availability: "available" }
+        : { ...row }),
+    },
+    { ...sampleSummary, expires_at: "2026-08-20T03:00:01.000Z" },
+    { ...sampleSummary, capability_status: "unknown" },
+    {
+      ...sampleSummary,
+      workbench_models: sampleSummary.workbench_models.map((row, index) => index === mappedIndex
+        ? { ...row, availability: "unknown" }
+        : { ...row }),
+    },
+    { ...sampleSummary, extra: "must fail closed" },
+    {
+      ...sampleSummary,
+      workbench_models: sampleSummary.workbench_models.map((row, index) => index === 0
+        ? { ...row, upstream_id: "must fail closed" }
+        : { ...row }),
+    },
+  ];
+
+  for (const result of badSummaries) {
+    await assert.rejects(
+      service.completeProbe({ attempt_id: claim.attempt_id, result }),
+      (error) => error.code === "UPSTREAM_SCHEMA_UNRECOGNIZED",
+    );
+  }
+  assert.equal((await store.read()).attempts[0].status, "pending");
 });
 
 test("failed attempts never restore authority for same or different idempotency keys", async () => {
