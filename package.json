@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Independent IMVIA Studio MCP with an optional, default-disabled read-only Lovart capability probe.",
   "scripts": {
-    "start": "node src/index.js",
+    "start": "sh scripts/start-mcp.sh",
     "configure:lovart": "swift scripts/configure-lovart.swift configure",
     "test": "node --test test/*.test.mjs",
     "test:orchestration": "node --test test/source-policy.test.mjs test/cost-confirmation.test.mjs test/account-status.test.mjs test/iteration.test.mjs test/orchestration-policy.test.mjs test/fake-lovart-adapter.test.mjs test/agent-workflow.test.mjs test/skill-contract.test.mjs",

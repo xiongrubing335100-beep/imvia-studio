@@ -58,3 +58,7 @@ wait for an explicit current-session acceptance before calling
 `imvia_confirm_generation`. Never auto-confirm, auto-retry a consumed action,
 or expose credential values. The existing Lovart plugin remains independent:
 do not import, execute, configure, reconnect, or modify it.
+
+On macOS, the launcher automatically reuses the active system HTTPS proxy
+provided by the user's VPN when one is configured; do not ask the user to
+disable their VPN or enter proxy settings into chat.
