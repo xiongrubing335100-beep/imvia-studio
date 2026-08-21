@@ -81,6 +81,56 @@ test("migrates legacy Lovart project ids without changing the local project", as
   assert.equal(JSON.parse(await readFile(path.join(dataDirectory, backupNames[0]), "utf8")).schema_version, "1");
 });
 
+test("creates an immutable direct Lovart job snapshot with live activation evidence", async (context) => {
+  const { service } = await createTestService(context);
+  await service.setLovartProject({ project_id: "project-1", name: "项目一", source: "user_selected" });
+  const snapshot = { mode: "image", prompt: { text: "A cinematic portrait", tokens: [] }, settings: { ratio: "16:9" } };
+  const prepared = await service.createDirectGenerationJob({
+    snapshot,
+    lovart_project_id: "project-1",
+    activation_source: { source: "codex_explicit" },
+    idempotency_key: "direct-1",
+  });
+  assert.equal(prepared.job.status, "queued_for_agent");
+  assert.equal(prepared.job.lovart_project_id, "project-1");
+  assert.deepEqual(prepared.job.snapshot.activation, { source: "codex_explicit" });
+  const retry = await service.createDirectGenerationJob({
+    snapshot,
+    lovart_project_id: "project-1",
+    activation_source: { source: "codex_explicit" },
+    idempotency_key: "direct-1",
+  });
+  assert.equal(retry.idempotent, true);
+  assert.equal(retry.job.id, prepared.job.id);
+
+  await service.setLovartProject({ project_id: "project-2", source: "user_selected" });
+  const state = await service.getState({ include: ["jobs"] });
+  assert.equal(state.jobs[0].lovart_project_id, "project-1");
+  assert.equal(state.jobs[0].snapshot.lovart_project_id, "project-1");
+});
+
+test("live job transitions accept only named live evidence and exact attempts", async (context) => {
+  const { service } = await createTestService(context);
+  const { job } = await service.createDirectGenerationJob({
+    snapshot: { mode: "image", prompt: { text: "A tree", tokens: [] } },
+    lovart_project_id: "project-1",
+    activation_source: { source: "workbench" },
+    idempotency_key: "direct-live-1",
+  });
+  await assert.rejects(
+    () => service.updateLiveJob({ job_id: job.id, expected_status: "queued_for_agent", next_status: "uploading", attempt: 1, source: "fixture:lovart_submit" }),
+    (error) => error.code === "VALIDATION_FAILED",
+  );
+  const updated = await service.updateLiveJob({ job_id: job.id, expected_status: "queued_for_agent", next_status: "uploading", attempt: 1, source: "imvia:lovart_upload" });
+  assert.equal(updated.job.status, "uploading");
+  await assert.rejects(
+    () => service.updateLiveJob({ job_id: job.id, expected_status: "uploading", next_status: "submitted", attempt: 2, source: "imvia:lovart_submit" }),
+    (error) => error.code === "STATUS_CONFLICT",
+  );
+  const submitted = await service.updateLiveJob({ job_id: job.id, expected_status: "uploading", next_status: "submitted", attempt: 1, source: "imvia:lovart_submit" });
+  assert.equal(submitted.job.status, "submitted");
+});
+
 test("applies a field-level patch without overwriting unrelated draft values", async (context) => {
   const { service } = await createTestService(context);
   const initial = await service.getState();

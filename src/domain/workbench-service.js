@@ -4,9 +4,9 @@ import path from "node:path";
 import { JsonStore } from "../persistence/json-store.js";
 import { createCostFingerprint } from "./cost-confirmation.js";
 import { DomainError } from "./errors.js";
-import { normalizeLovartProjectLocator } from "./lovart-project-context.js";
+import { assertContinuationParent, normalizeLovartProjectLocator } from "./lovart-project-context.js";
 import { MODEL_CAPABILITIES } from "./model-capabilities.js";
-import { assertM5Source, isAllowedM5Source } from "./source-policy.js";
+import { assertLiveSource, assertM5Source, isAllowedM5Source } from "./source-policy.js";
 import { assertExpiryAtOrAfterChecked, assertSourceCheckedAt } from "./timestamps.js";
 
 export { DomainError } from "./errors.js";
@@ -36,6 +36,10 @@ const JOB_TRANSITIONS = new Map([
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function stableJson(value) {
+  return JSON.stringify(value);
 }
 
 function isoNow() {
@@ -190,7 +194,7 @@ function assertCurrentCost(job, { attempt, cost_fingerprint }) {
 }
 
 function isFixtureSource(source) {
-  return isAllowedM5Source(source) && (source.startsWith("fixture:") || source.startsWith("mock_lovart:"));
+  return isAllowedM5Source(source) && (source.startsWith("fixture:") || source.startsWith("mock_lovart:") || source === "imvia:mock_agent");
 }
 
 function assertFixtureSource(source, { field = "source" } = {}) {
@@ -529,6 +533,129 @@ export function createWorkbenchService({ dataDirectory }) {
       });
     },
 
+    async createDirectGenerationJob({ snapshot, lovart_project_id, activation_source, idempotency_key }) {
+      if (!idempotency_key || typeof idempotency_key !== "string") throw new DomainError("VALIDATION_FAILED", "idempotency_key is required.", { field: "idempotency_key" });
+      if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) throw new DomainError("VALIDATION_FAILED", "snapshot must be an object.", { field: "snapshot" });
+      const normalized = normalizeLovartProjectLocator(lovart_project_id);
+      const activation = typeof activation_source === "string"
+        ? { source: assertContinuationParent({ activation_source }).activation_source }
+        : clone(activation_source ?? {});
+      assertContinuationParent({
+        activation_source: activation.source,
+        parent_job_id: activation.parent_job_id,
+        artifact_id: activation.artifact_id,
+      });
+      return store.update((state) => {
+        const existing = state.idempotency[idempotency_key];
+        const comparableActivation = stableJson(activation);
+        const comparableSnapshot = stableJson(snapshot);
+        if (existing) {
+          if (
+            existing.operation !== "direct_generation"
+            || existing.lovart_project_id !== normalized.project_id
+            || existing.activation !== comparableActivation
+            || existing.snapshot !== comparableSnapshot
+          ) throw new DomainError("IDEMPOTENCY_CONFLICT", "This idempotency key belongs to a different direct-generation request.");
+          return { job: clone(findJob(state, existing.job_id)), idempotent: true };
+        }
+        const now = isoNow();
+        const job = {
+          id: randomUUID(),
+          project_id: currentProject(state).id,
+          draft_id: null,
+          draft_revision: null,
+          snapshot: { ...clone(snapshot), lovart_project_id: normalized.project_id, activation: clone(activation) },
+          status: "queued_for_agent",
+          attempt: 1,
+          idempotency_key,
+          direct_generation: true,
+          lovart_project_id: normalized.project_id,
+          activation: clone(activation),
+          lovart_thread_id: null,
+          lovart_thread_source: null,
+          parent_job_id: activation.parent_job_id ?? null,
+          iteration_index: 0,
+          estimated_cost: null,
+          cost_decisions: [],
+          error: null,
+          created_at: now,
+          updated_at: now,
+        };
+        state.jobs.push(job);
+        state.idempotency[idempotency_key] = {
+          operation: "direct_generation",
+          job_id: job.id,
+          lovart_project_id: normalized.project_id,
+          activation: comparableActivation,
+          snapshot: comparableSnapshot,
+        };
+        state.updated_at = now;
+        state.audit_events.push({ id: randomUUID(), occurred_at: now, actor: "imvia:lovart_submit", reason: "Direct Lovart generation job created", changed_fields: ["jobs", "idempotency"] });
+        return { job: clone(job), idempotent: false };
+      });
+    },
+
+    async updateLiveJob({
+      job_id,
+      expected_status,
+      next_status,
+      attempt,
+      source,
+      source_checked_at,
+      lovart_thread_id,
+      estimated_cost,
+      cost_decision_id,
+      confirmation_evidence,
+      error,
+    }) {
+      assertLiveSource(source);
+      if (!Number.isInteger(attempt) || attempt < 1) throw new DomainError("VALIDATION_FAILED", "attempt must be a positive integer.", { field: "attempt" });
+      const isCostTransition = expected_status === "submitted" && next_status === "awaiting_cost_confirmation";
+      let canonicalCostCheckedAt = null;
+      if (isCostTransition) {
+        if (!estimated_cost || typeof estimated_cost !== "object" || Array.isArray(estimated_cost) || !Number.isFinite(estimated_cost.amount) || estimated_cost.amount < 0 || typeof estimated_cost.unit !== "string" || !estimated_cost.unit) {
+          throw new DomainError("VALIDATION_FAILED", "A complete sourced cost is required for the awaiting-cost transition.", { field: "estimated_cost" });
+        }
+        canonicalCostCheckedAt = assertSourceCheckedAt(source_checked_at, { field: "source_checked_at" });
+      } else if (estimated_cost != null || source_checked_at != null) {
+        throw new DomainError("VALIDATION_FAILED", "estimated_cost and source_checked_at may only be written when entering awaiting_cost_confirmation.", { field: "estimated_cost" });
+      }
+      const isConfirmationSuccess = expected_status === "awaiting_cost_confirmation" && next_status === "generating";
+      if (isConfirmationSuccess && (!cost_decision_id || confirmation_evidence?.kind !== "confirmation_accepted")) {
+        throw new DomainError("COST_CONFIRMATION_REQUIRED", "The exact claimed decision and confirmation-success evidence are required.", { job_id, attempt });
+      }
+      if (!isConfirmationSuccess && (cost_decision_id != null || confirmation_evidence != null)) {
+        throw new DomainError("VALIDATION_FAILED", "Confirmation evidence is not valid for this job transition.", { field: "confirmation_evidence" });
+      }
+      const result = await store.update((state) => {
+        const job = findJob(state, job_id);
+        if (!job.direct_generation) throw new DomainError("VALIDATION_FAILED", "The requested job is not a direct Lovart job.", { job_id });
+        if (job.status !== expected_status || job.attempt !== attempt) throw statusConflict(job, "The live job status or attempt changed.", { expected_status, expected_attempt: attempt });
+        if (!JOB_TRANSITIONS.get(job.status)?.has(next_status)) throw statusConflict(job, "The requested live job transition is not allowed.", { next_status });
+        const confirmationDecision = isConfirmationSuccess ? claimedDecisionForConfirmation(job, { cost_decision_id }) : null;
+        if (isCostTransition) {
+          if (job.estimated_cost != null) throw new DomainError("COST_CONFIRMATION_CONFLICT", "The sourced cost is already recorded and cannot be replaced.", { job_id, attempt });
+          job.estimated_cost = { amount: estimated_cost.amount, unit: estimated_cost.unit, source, checked_at: canonicalCostCheckedAt };
+        }
+        if (lovart_thread_id != null) {
+          if (typeof lovart_thread_id !== "string" || !lovart_thread_id) throw new DomainError("VALIDATION_FAILED", "lovart_thread_id must be a non-empty string.", { field: "lovart_thread_id" });
+          if (job.lovart_thread_id && job.lovart_thread_id !== lovart_thread_id) throw statusConflict(job, "The live job is already linked to a different thread.", { lovart_thread_id: job.lovart_thread_id });
+          job.lovart_thread_id ??= lovart_thread_id;
+          job.lovart_thread_source ??= source;
+        }
+        const now = isoNow();
+        if (confirmationDecision) confirmationDecision.confirmation = { status: "succeeded", source, recorded_at: now };
+        job.status = next_status;
+        job.error = error == null ? job.error : { ...clone(error), source };
+        job.updated_at = now;
+        state.updated_at = now;
+        state.audit_events.push({ id: randomUUID(), occurred_at: now, actor: source, reason: `Live job status: ${expected_status} -> ${next_status}`, changed_fields: ["status", ...(isCostTransition ? ["estimated_cost"] : []), ...(lovart_thread_id != null ? ["lovart_thread_id"] : []), ...(confirmationDecision ? ["cost_decisions"] : [])] });
+        return { job: clone(job) };
+      });
+      publish(listeners, { type: "job.updated", occurred_at: isoNow(), data: { job_id: result.job.id, status: result.job.status, attempt: result.job.attempt } });
+      return result;
+    },
+
     async prepareGeneration({ draft_id, expected_revision, idempotency_key }) {
       if (!idempotency_key || typeof idempotency_key !== "string") {
         throw new DomainError("VALIDATION_FAILED", "idempotency_key is required.");
@@ -596,7 +723,7 @@ export function createWorkbenchService({ dataDirectory }) {
       confirmation_evidence,
       error,
     }) {
-      assertM5Source(source);
+      assertFixtureSource(source);
       const isCostTransition = expected_status === "submitted" && next_status === "awaiting_cost_confirmation";
       let canonicalCostCheckedAt = null;
       if (isCostTransition) {
