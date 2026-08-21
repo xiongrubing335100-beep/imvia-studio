@@ -6,10 +6,12 @@ read-only Lovart capability probe, and adds a Milestone 7 no-terminal Lovart
 connection and creation path. The MCP Server ID remains
 `imvia-studio`.
 
-On macOS, the MCP launcher reads the system HTTPS proxy configured by the
-active VPN (when present) and passes it to Node's HTTP client. This lets the
-plugin use the same VPN route as the browser without asking for a proxy value
-or putting credentials in the environment.
+The MCP launcher uses a portable proxy policy. By default (`IMVIA_PROXY_MODE=auto`)
+it honors standard `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` variables, then checks
+the macOS system HTTPS proxy only when no standard proxy is present, and falls
+back to a direct connection when neither exists. Nothing is hard-coded or
+persisted. Set `IMVIA_PROXY_MODE=direct` to force direct access, `env` to use
+only standard proxy variables, or `system` to use only the macOS system proxy.
 
 > Installation, dependency installation, and automated tests do not authorize
 > a live Lovart probe or creation. They do not provision credentials, upload,
