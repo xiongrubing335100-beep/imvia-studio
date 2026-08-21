@@ -26,6 +26,17 @@ function body(request) {
 function send(response, status, payload) { response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }); response.end(JSON.stringify(payload)); }
 function envelope(data) { return { api_version: "1", ok: true, data }; }
 function errorPayload(error) { const known = error instanceof DomainError; return { api_version: "1", ok: false, error: { code: known ? error.code : "STORE_UNAVAILABLE", message: known ? error.message : "Local workbench service is unavailable.", retryable: known && ["REVISION_CONFLICT", "STATUS_CONFLICT"].includes(error.code), details: known ? error.details : {} } }; }
+function redactedConnection(value) {
+  const connected = value?.status === "connected";
+  const code = typeof value?.code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(value.code) ? value.code : null;
+  return { status: connected ? "connected" : "not_connected", ...(code ? { code } : {}) };
+}
+function redirectToWorkbench(response, connection) {
+  const query = new URLSearchParams({ imvia: "live", lovart: connection.status });
+  if (connection.code) query.set("code", connection.code);
+  response.writeHead(303, { location: `/workbench?${query}`, "cache-control": "no-store" });
+  response.end();
+}
 
 async function serveWorkbench(response, pathname, workbenchDirectory) {
   let relativePath;
@@ -79,6 +90,20 @@ export async function startHttpServer({ dataDirectory, service: providedService,
         response.writeHead(302, { location: "/workbench?imvia=live", "cache-control": "no-store" });
         response.end();
         return;
+      }
+      if (request.method === "GET" && url.pathname === "/workbench/bootstrap.js") {
+        let connection = { status: "not_connected", code: "CONNECTION_UNAVAILABLE" };
+        if (typeof lovartConnection?.status === "function") {
+          try { connection = redactedConnection(await lovartConnection.status()); } catch { connection = { status: "not_connected", code: "CONNECTION_UNAVAILABLE" }; }
+        }
+        response.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
+        response.end(`window.__IMVIA_LOVART_STATUS__=${JSON.stringify(connection)};`);
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/workbench/lovart/connect") {
+        if (typeof lovartConnection?.connect !== "function") return redirectToWorkbench(response, { status: "not_connected", code: "CONNECTION_UNAVAILABLE" });
+        try { return redirectToWorkbench(response, redactedConnection(await lovartConnection.connect())); }
+        catch { return redirectToWorkbench(response, { status: "not_connected", code: "UPSTREAM_UNAVAILABLE" }); }
       }
       if (request.method === "GET" && await serveWorkbench(response, url.pathname, workbenchDirectory)) return;
       if (request.method === "GET" && url.pathname === "/api/v1/health") return send(response, 200, envelope({ status: "ok", bind: "127.0.0.1" }));

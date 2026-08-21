@@ -13,12 +13,9 @@ case "$proxy_mode" in
   auto|system)
     if [ "$proxy_mode" = "auto" ] && { [ -n "${HTTPS_PROXY:-}" ] || [ -n "${HTTP_PROXY:-}" ] || [ -n "${ALL_PROXY:-}" ]; }; then
       export NODE_USE_ENV_PROXY=1
-    elif [ "$(uname -s 2>/dev/null || true)" = "Darwin" ] && command -v scutil >/dev/null 2>&1; then
-      proxy_host="$(/usr/sbin/scutil --proxy 2>/dev/null | awk '/^  HTTPSProxy :/{print $3; exit}')"
-      proxy_port="$(/usr/sbin/scutil --proxy 2>/dev/null | awk '/^  HTTPSPort :/{print $3; exit}')"
-      https_enabled="$(/usr/sbin/scutil --proxy 2>/dev/null | awk '/^  HTTPSEnable :/{print $3; exit}')"
-      if [ "${https_enabled:-0}" = "1" ] && [ -n "${proxy_host:-}" ] && [ -n "${proxy_port:-}" ]; then
-        proxy_url="http://${proxy_host}:${proxy_port}"
+    elif [ "$(uname -s 2>/dev/null || true)" = "Darwin" ]; then
+      proxy_url="$(node "$(dirname "$0")/detect-system-proxy.mjs" 2>/dev/null || true)"
+      if [ -n "${proxy_url:-}" ]; then
         export NODE_USE_ENV_PROXY=1
         export HTTPS_PROXY="${HTTPS_PROXY:-$proxy_url}"
         export HTTP_PROXY="${HTTP_PROXY:-$proxy_url}"

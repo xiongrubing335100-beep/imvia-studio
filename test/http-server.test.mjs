@@ -52,9 +52,11 @@ test("loopback HTTP server serves the bundled live IMVIA Studio workbench", asyn
   assert.match(script.headers.get("content-type") || "", /javascript/);
   assert.match(await script.text(), /IMVIA Studio/);
 
-  const bridge = await fetch(`${server.url}/assets/imvia-lovart-bridge.js`);
+  const bridgePath = [...html.matchAll(/src="([^"]+\.js)"/g)].map((match) => match[1]).find((value) => value.includes("imvia-lovart-bridge"));
+  assert.ok(bridgePath);
+  const bridge = await fetch(`${server.url}${bridgePath}`);
   assert.equal(bridge.status, 200);
-  assert.match(await bridge.text(), /\/api\/v1\/lovart\/connect/);
+  assert.match(await bridge.text(), /\/workbench\/lovart\/connect/);
 
   const root = await fetch(server.url, { redirect: "manual" });
   assert.equal(root.status, 302);
@@ -81,6 +83,42 @@ test("workbench connection routes expose only redacted Lovart status", async (co
   assert.deepEqual(calls, ["connect"]);
   assert.equal(JSON.stringify(connected).includes("accessKey"), false);
   assert.equal(JSON.stringify(connected).includes("secretKey"), false);
+});
+
+test("workbench connects through form navigation when page request APIs are unavailable", async (context) => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-http-lovart-form-"));
+  const calls = [];
+  const server = await startHttpServer({
+    dataDirectory,
+    port: 0,
+    lovartConnection: {
+      status: async () => ({ status: "connected", checked_at: "2026-08-21T00:00:00.000Z" }),
+      connect: async () => { calls.push("connect"); return { status: "connected", checked_at: "2026-08-21T00:00:00.000Z", lovart: { reachable: true } }; },
+    },
+  });
+  context.after(async () => { await server.close(); await rm(dataDirectory, { recursive: true, force: true }); });
+
+  const bootstrap = await fetch(`${server.url}/workbench/bootstrap.js`);
+  assert.equal(bootstrap.status, 200);
+  assert.match(bootstrap.headers.get("content-type") || "", /javascript/);
+  const bootstrapSource = await bootstrap.text();
+  assert.match(bootstrapSource, /"status":"connected"/);
+  assert.equal(bootstrapSource.includes("accessKey"), false);
+  assert.equal(bootstrapSource.includes("secretKey"), false);
+
+  const page = await fetch(server.workbenchUrl).then((response) => response.text());
+  const bridgePath = [...page.matchAll(/src="([^"]+\.js)"/g)].map((match) => match[1]).find((value) => value.includes("imvia-lovart-bridge"));
+  assert.equal(bridgePath, "/assets/imvia-lovart-bridge-v2.js");
+  const bridgeSource = await fetch(`${server.url}${bridgePath}`).then((response) => response.text());
+  assert.match(bridgeSource, /method="post"/i);
+  assert.match(bridgeSource, /action="\/workbench\/lovart\/connect"/);
+  assert.equal(/\bfetch\s*\(/.test(bridgeSource), false);
+  assert.equal(/XMLHttpRequest/.test(bridgeSource), false);
+
+  const connected = await fetch(`${server.url}/workbench/lovart/connect`, { method: "POST", redirect: "manual" });
+  assert.equal(connected.status, 303);
+  assert.equal(connected.headers.get("location"), "/workbench?imvia=live&lovart=connected");
+  assert.deepEqual(calls, ["connect"]);
 });
 
 test("SSE emits the updated draft revision after a local patch", async (context) => {
