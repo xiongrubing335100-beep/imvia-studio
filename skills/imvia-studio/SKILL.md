@@ -1,6 +1,6 @@
 ---
 name: imvia-studio
-description: Run IMVIA Studio's fixture-only Milestone 5 mock orchestration and optional, default-disabled Milestone 6 read-only Lovart probe; never use real Lovart generation, MCP credentials, marketplace, or UI.
+description: Run IMVIA Studio's fixture-only Milestone 5 mock orchestration, optional Milestone 6 read-only probe, and explicit Milestone 7 Lovart connection/creation flow without exposing credentials or touching the existing Lovart plugin.
 ---
 
 # IMVIA Studio
@@ -31,7 +31,7 @@ Write fixture status through `imvia_update_job`. Cache only sourced billing mode
 
 ## Stop conditions
 
-On revision/status conflict, unknown response, missing mock adapter, or failed confirmation, stop, re-read local state when safe, and explain the state. Do not skip a state, blindly replay a side effect, connect to real Lovart, install a marketplace entry, or advance to Milestone 6.
+On revision/status conflict, unknown response, missing mock adapter, or failed confirmation, stop, re-read local state when safe, and explain the state. Do not skip a state, blindly replay a side effect, connect to real Lovart without the Milestone 7 user action, install a marketplace entry, or advance a fixture job into live execution.
 
 ## Milestone 6 read-only Lovart probe
 
@@ -44,3 +44,17 @@ One explicit request in the current conversation permits exactly one fresh autho
 Feature disabled, unsupported platform, invalid, expired, or consumed authorization, or a missing credential reference must produce zero Lovart requests. An idempotent completed replay must perform zero Keychain reads and zero Lovart requests.
 
 The probe is advisory and must not alter job, draft, artifact, cost, iteration, or execution behavior. Never upload, generate, confirm, query projects, threads, status, results, or balance; never expose AK/SK; and never call the existing Lovart plugin.
+
+## Milestone 7 one-click Lovart workflow
+
+When the user explicitly asks to connect Lovart, call `imvia_connect_lovart` with
+an empty object. The tool opens the native secure dialog; never ask the user to
+paste AK/SK into chat, MCP arguments, environment variables, or a file. The
+result is redacted. `imvia_lovart_status` reads only the redacted local state.
+
+After a connected result, call `imvia_generate` with the user's original
+prompt. It may return `pending_confirmation`; show the amount and unit and
+wait for an explicit current-session acceptance before calling
+`imvia_confirm_generation`. Never auto-confirm, auto-retry a consumed action,
+or expose credential values. The existing Lovart plugin remains independent:
+do not import, execute, configure, reconnect, or modify it.

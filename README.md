@@ -1,13 +1,15 @@
 # IMVIA Studio MCP
 
-IMVIA Studio is an independent local MCP plugin. Version 0.2.0 keeps the
-Milestone 5 fixture-only orchestration and adds one optional, default-disabled
-Milestone 6 read-only Lovart capability probe. The MCP Server ID remains
+IMVIA Studio is an independent local MCP plugin. Version 0.3.0 keeps the
+Milestone 5 fixture-only orchestration, keeps the optional Milestone 6
+read-only Lovart capability probe, and adds a Milestone 7 no-terminal Lovart
+connection and creation path. The MCP Server ID remains
 `imvia-studio`.
 
 > Installation, dependency installation, and automated tests do not authorize
-> a live Lovart probe or generation. They do not provision credentials, enable
-> the probe, upload, generate, confirm a cost, or contact Lovart.
+> a live Lovart probe or creation. They do not provision credentials, upload,
+> generate, confirm a cost, or contact Lovart. A user must explicitly choose
+> the connection or creation action in the current workbench session.
 
 ## Architecture and scope
 
@@ -15,6 +17,18 @@ The existing workbench path remains local and fixture-only:
 
 ```text
 12 existing MCP tools -> local workbench service -> .imvia-studio-dev local state
+```
+
+The user-facing Lovart path is separate and starts only from an explicit
+workbench action:
+
+```text
+imvia_connect_lovart
+  -> native password-style dialog
+  -> IMVIA-owned Keychain item
+  -> fixed Lovart mode check
+  -> redacted connected/not-connected status
+  -> imvia_generate / imvia_confirm_generation when the user asks to create
 ```
 
 The optional probe is isolated from that workbench path:
@@ -52,7 +66,7 @@ identifiers are ignored.
 
 ## Tool inventory
 
-The MCP server exposes exactly 14 tools. The original 12 retain their schemas
+The MCP server exposes exactly 18 tools. The original 12 retain their schemas
 and fixture-only behavior:
 
 - `imvia_claim_cost_decision`
@@ -72,6 +86,32 @@ Milestone 6 adds:
 
 - `imvia_authorize_lovart_probe`
 - `imvia_probe_lovart_capabilities`
+
+Milestone 7 adds the no-terminal user flow:
+
+- `imvia_connect_lovart`
+- `imvia_lovart_status`
+- `imvia_generate`
+- `imvia_confirm_generation`
+
+## No-terminal Lovart workflow
+
+In the workbench, call `imvia_connect_lovart` with `{}`. IMVIA opens a native
+macOS password-style dialog; enter the two Lovart keys there and choose
+**Connect**. The values are stored only in the IMVIA-owned Keychain item
+`ai.imvia.studio.lovart` and are never accepted as MCP arguments or returned
+to chat. The result contains only `connected`, `not_connected`, or a stable
+redacted error code.
+
+After the result is `connected`, call `imvia_generate` with a prompt. It
+returns completed artifacts, an aborted/timeout status, or
+`final_status: "pending_confirmation"` with the estimated cost. Do not call
+`imvia_confirm_generation` until the user explicitly accepts that cost in the
+current conversation. Confirmation is never automatic.
+
+If the connection is already configured, `imvia_lovart_status` reads the
+local redacted status without opening a dialog. The `configure:lovart` script
+is a developer fallback only; ordinary users should not need a terminal.
 
 ## Probe setup and feature state
 
