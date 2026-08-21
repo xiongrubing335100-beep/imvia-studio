@@ -1,6 +1,38 @@
 #!/bin/sh
 set -eu
 
+script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+resolve_node_binary() {
+  if [ -n "${IMVIA_NODE_BINARY:-}" ] && [ -x "$IMVIA_NODE_BINARY" ]; then
+    printf '%s\n' "$IMVIA_NODE_BINARY"
+    return 0
+  fi
+  if command -v node >/dev/null 2>&1; then
+    command -v node
+    return 0
+  fi
+  user_home_dir="${HOME:-}"
+  for candidate in \
+    "$user_home_dir"/.cache/codex-runtimes/*/dependencies/node/bin/node \
+    "$user_home_dir"/.codex/runtimes/*/dependencies/node/bin/node \
+    /opt/homebrew/bin/node \
+    /usr/local/bin/node \
+    /usr/bin/node
+  do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+node_binary=$(resolve_node_binary) || {
+  echo "IMVIA Studio requires Node.js. Set IMVIA_NODE_BINARY or install Node.js." >&2
+  exit 127
+}
+
 proxy_mode="${IMVIA_PROXY_MODE:-auto}"
 
 case "$proxy_mode" in
@@ -14,7 +46,7 @@ case "$proxy_mode" in
     if [ "$proxy_mode" = "auto" ] && { [ -n "${HTTPS_PROXY:-}" ] || [ -n "${HTTP_PROXY:-}" ] || [ -n "${ALL_PROXY:-}" ]; }; then
       export NODE_USE_ENV_PROXY=1
     elif [ "$(uname -s 2>/dev/null || true)" = "Darwin" ]; then
-      proxy_url="$(node "$(dirname "$0")/detect-system-proxy.mjs" 2>/dev/null || true)"
+      proxy_url="$($node_binary "$script_directory/detect-system-proxy.mjs" 2>/dev/null || true)"
       if [ -n "${proxy_url:-}" ]; then
         export NODE_USE_ENV_PROXY=1
         export HTTPS_PROXY="${HTTPS_PROXY:-$proxy_url}"
@@ -29,4 +61,4 @@ case "$proxy_mode" in
     ;;
 esac
 
-exec node "$(dirname "$0")/../src/index.js" "$@"
+exec "$node_binary" "$script_directory/../src/index.js" "$@"

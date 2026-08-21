@@ -84,3 +84,27 @@ printf '{"node_use":"%s","https":"%s","http":"%s","all":"%s","entry":"%s"}\\n' "
   });
   assert.equal(path.resolve(environment.entry), path.resolve("src/index.js"));
 });
+
+test("MCP launcher starts without a global node when IMVIA_NODE_BINARY is provided", async (context) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "imvia-node-launcher-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const fakeNode = path.join(directory, "codex-node");
+  await writeFile(fakeNode, `#!/bin/sh
+printf '{"entry":"%s"}\n' "$1"
+`);
+  await chmod(fakeNode, 0o755);
+
+  const result = spawnSync("sh", [path.resolve("scripts/start-mcp.sh")], {
+    cwd: path.resolve("."),
+    encoding: "utf8",
+    env: {
+      PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+      IMVIA_NODE_BINARY: fakeNode,
+      IMVIA_PROXY_MODE: "direct",
+    },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const environment = JSON.parse(result.stdout);
+  assert.equal(path.resolve(environment.entry), path.resolve("src/index.js"));
+});
