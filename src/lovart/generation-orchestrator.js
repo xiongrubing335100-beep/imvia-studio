@@ -7,6 +7,7 @@ const LIVE_STATUS = "imvia:lovart_status";
 const LIVE_IMPORT = "imvia:lovart_import";
 const LIVE_CONFIRM = "imvia:lovart_confirm";
 const LIVE_FOLLOW_UP = "imvia:lovart_submit";
+const WORKBENCH_ASSET_PREFIX = "imvia-workbench:";
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -117,7 +118,10 @@ export function createGenerationOrchestrator({
       await workbenchService.updateLiveJob({ job_id: job.id, expected_status: "queued_for_agent", next_status: "uploading", attempt: job.attempt, source: LIVE_UPLOAD });
       const attachments = [];
       for (const attachment of input.attachments ?? []) {
-        if (artifactTransfer?.prepareUpload && typeof attachment === "string" && !/^https:\/\//iu.test(attachment)) {
+        if (typeof attachment === "string" && attachment.startsWith(WORKBENCH_ASSET_PREFIX) && artifactTransfer?.prepareWorkspaceAsset) {
+          const preparedUpload = await artifactTransfer.prepareWorkspaceAsset({ asset_path: attachment.slice(WORKBENCH_ASSET_PREFIX.length) });
+          attachments.push((await generationService.upload(preparedUpload)).url);
+        } else if (artifactTransfer?.prepareUpload && typeof attachment === "string" && !/^https:\/\//iu.test(attachment)) {
           const preparedUpload = await artifactTransfer.prepareUpload({ local_path: attachment });
           attachments.push((await generationService.upload(preparedUpload)).url);
         } else attachments.push(attachment);

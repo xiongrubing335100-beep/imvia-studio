@@ -56,7 +56,7 @@ function extensionFor(url, kind, contentType) {
   return kind === "video" ? ".mp4" : kind === "audio" ? ".mp3" : ".png";
 }
 
-export function createArtifactTransfer({ dataDirectory, fetchImpl = globalThis.fetch } = {}) {
+export function createArtifactTransfer({ dataDirectory, fetchImpl = globalThis.fetch, workspaceDirectory = null } = {}) {
   if (!dataDirectory) throw new TypeError("dataDirectory is required");
   if (typeof fetchImpl !== "function") throw new TypeError("fetch is unavailable");
 
@@ -69,6 +69,22 @@ export function createArtifactTransfer({ dataDirectory, fetchImpl = globalThis.f
       throw new DomainError("PATH_NOT_ALLOWED", "The managed artifact file is unavailable.");
     }
     if (!info.isFile() || info.isSymbolicLink()) throw new DomainError("PATH_NOT_ALLOWED", "Artifact path must identify a regular managed file.");
+    return { file_path: resolved };
+  }
+
+  async function prepareWorkspaceAsset({ asset_path: assetPath }) {
+    if (typeof assetPath !== "string" || !assetPath.startsWith("/assets/")) {
+      throw new DomainError("PATH_NOT_ALLOWED", "Only bundled workbench assets may be uploaded.");
+    }
+    if (typeof workspaceDirectory !== "string" || !path.isAbsolute(workspaceDirectory)) {
+      throw new DomainError("PATH_NOT_ALLOWED", "The workbench asset directory is unavailable.");
+    }
+    const root = path.resolve(workspaceDirectory);
+    const resolved = path.resolve(root, assetPath.slice(1));
+    if (!resolved.startsWith(`${root}${path.sep}`)) throw new DomainError("PATH_NOT_ALLOWED", "The workbench asset is outside the bundled asset directory.");
+    let info;
+    try { info = await lstat(resolved); } catch { throw new DomainError("PATH_NOT_ALLOWED", "The bundled workbench asset is unavailable."); }
+    if (!info.isFile() || info.isSymbolicLink()) throw new DomainError("PATH_NOT_ALLOWED", "The bundled workbench asset must be a regular file.");
     return { file_path: resolved };
   }
 
@@ -116,5 +132,5 @@ export function createArtifactTransfer({ dataDirectory, fetchImpl = globalThis.f
     }
   }
 
-  return Object.freeze({ prepareUpload, downloadResults });
+  return Object.freeze({ prepareUpload, prepareWorkspaceAsset, downloadResults });
 }

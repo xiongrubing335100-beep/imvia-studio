@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 const PLUGIN_VERSION = "0.3.0";
 const SCHEMA_VERSION = "1";
 const DEFAULT_HTTP_PORT = 4190;
+const WORKBENCH_DIRECTORY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../workbench/dist");
 const authorizeProbeInput = z.object({
   source: z.literal("user:current_session"),
   reason: z.string().trim().min(1),
@@ -166,7 +167,7 @@ export function createServer({
       ? createProjectContextService({ workbenchService: service, generationService })
       : null
   );
-  const artifactTransfer = providedArtifactTransfer ?? (projectContextService ? createArtifactTransfer({ dataDirectory: stateDirectory }) : null);
+  const artifactTransfer = providedArtifactTransfer ?? (projectContextService ? createArtifactTransfer({ dataDirectory: stateDirectory, workspaceDirectory: WORKBENCH_DIRECTORY }) : null);
   const orchestrator = providedOrchestrator ?? (
     projectContextService && generationService?.generate && generationService?.confirm && service?.createDirectGenerationJob
       ? createGenerationOrchestrator({ projectContextService, workbenchService: service, generationService, artifactTransfer })
@@ -395,7 +396,7 @@ export async function startServer() {
   const credentialService = createCredentialService();
   const generationService = createGenerationService({ credentialService });
   const projectContextService = createProjectContextService({ workbenchService: service, generationService });
-  const artifactTransfer = createArtifactTransfer({ dataDirectory: stateDirectory });
+  const artifactTransfer = createArtifactTransfer({ dataDirectory: stateDirectory, workspaceDirectory: WORKBENCH_DIRECTORY });
   const orchestrator = createGenerationOrchestrator({ projectContextService, workbenchService: service, generationService, artifactTransfer });
   const http = await startHttpServer({
     service,

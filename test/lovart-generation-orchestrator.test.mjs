@@ -16,6 +16,9 @@ async function createHarness(context) {
   const resultFile = path.join(dataDirectory, "results", "fake.png");
   await mkdir(path.dirname(resultFile), { recursive: true });
   await writeFile(resultFile, "fake-result", { mode: 0o600 });
+  const workspaceAsset = path.join(dataDirectory, "assets", "sample.png");
+  await mkdir(path.dirname(workspaceAsset), { recursive: true });
+  await writeFile(workspaceAsset, "fake-asset", { mode: 0o600 });
   const generationService = {
     async createProject(input) { calls.push(["createProject", input]); return { project_id: "project-auto", project_name: input.project_name || "自动项目" }; },
     async validateProject(input) { calls.push(["validateProject", input]); return { valid: true, project_name: "外部项目" }; },
@@ -31,6 +34,7 @@ async function createHarness(context) {
   const projectContextService = createProjectContextService({ workbenchService, generationService });
   const artifactTransfer = {
     async prepareUpload(input) { calls.push(["prepareUpload", input]); return { file_path: input.local_path }; },
+    async prepareWorkspaceAsset(input) { calls.push(["prepareWorkspaceAsset", input]); return { file_path: workspaceAsset }; },
     async downloadResults(input) { calls.push(["downloadResults", input]); return { artifacts: [{ kind: "image", local_path: resultFile, source_url: "https://cdn.lovart.ai/result.png", source_artifact_id: "artifact-source-1" }] }; },
   };
   return { calls, workbenchService, projectContextService, generationService, artifactTransfer, orchestrator: createGenerationOrchestrator({ projectContextService, workbenchService, generationService, artifactTransfer }) };
@@ -44,6 +48,22 @@ test("creates one project, submits, and imports a direct result", async (context
   assert.equal(calls.filter(([name]) => name === "createProject").length, 1);
   assert.equal(calls.filter(([name]) => name === "generate").length, 1);
   assert.equal(calls.filter(([name]) => name === "confirm").length, 0);
+});
+
+test("uploads only managed workbench assets for direct generation", async (context) => {
+  const { calls, orchestrator } = await createHarness(context);
+  const output = await orchestrator.submit({
+    prompt: "Use the registered reference",
+    mode: "image",
+    attachments: ["imvia-workbench:/assets/sample.png"],
+    activation: { source: "workbench_action" },
+    idempotency_key: "workbench-asset-1",
+  });
+  assert.equal(output.job.status, "succeeded");
+  assert.deepEqual(calls.find(([name]) => name === "prepareWorkspaceAsset"), ["prepareWorkspaceAsset", { asset_path: "/assets/sample.png" }]);
+  assert.equal(calls.filter(([name]) => name === "prepareUpload").length, 0);
+  const generated = calls.find(([name]) => name === "generate");
+  assert.deepEqual(generated[1].attachments, ["https://cdn.lovart.ai/sample.png"]);
 });
 
 test("explicit project is validated without changing the active project", async (context) => {

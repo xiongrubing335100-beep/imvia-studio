@@ -21,6 +21,18 @@
     #${rootId} .irw-status{position:absolute;left:20px;right:20px;bottom:18px;min-height:44px;padding:0 12px;display:flex;align-items:center;gap:8px;border:1px solid #242a2e;border-radius:10px;background:#171b1e;color:#8e969a;font-size:11px}
     #${rootId} .irw-error{color:#e49b9b}#${rootId} .irw-empty{grid-column:1 / -1;min-height:160px;display:grid;place-items:center;text-align:center;color:#92999d;font-size:12px}
     @media(max-width:900px){#${rootId} .irw-body{grid-template-columns:1fr}#${rootId} .irw-follow{grid-column:1}}
+    #imvia-project-context{padding:16px 0;border-bottom:1px solid #20262a}
+    #imvia-project-context .imvia-project-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+    #imvia-project-context .imvia-project-head strong{font-size:15px;color:#f1f4f4}
+    #imvia-project-context .imvia-project-head span{color:#92999d;font-size:11px}
+    #imvia-project-context .imvia-project-row{display:flex;gap:8px;align-items:center}
+    #imvia-project-context input{flex:1;min-width:0;height:40px;padding:0 12px;border:1px solid #2a3236;border-radius:10px;background:#171b1f;color:#e8eded;font-size:12px;outline:0}
+    #imvia-project-context input:focus{border-color:#57d6d8;box-shadow:0 0 0 2px #57d6d82b}
+    #imvia-project-context button{height:40px;padding:0 13px;border:0;border-radius:10px;background:#3f9095;color:#f2ffff;font-size:12px;font-weight:600;white-space:nowrap}
+    #imvia-project-context button:disabled{opacity:.5;cursor:wait}
+    #imvia-project-context .imvia-project-status{display:block;margin-top:8px;color:#778185;font-size:10px;line-height:1.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    #imvia-workbench-toast{position:fixed;z-index:240;left:50%;bottom:24px;transform:translateX(-50%);max-width:min(560px,calc(100vw - 40px));min-height:42px;padding:10px 18px;border:1px solid #334044;border-radius:22px;background:#171c1f;color:#dce5e6;box-shadow:0 10px 40px #0008;font-size:12px;line-height:1.4;text-align:center}
+    #imvia-workbench-toast.error{color:#f0b2b2;border-color:#71454a}
   `;
   const style = document.createElement("style"); style.textContent = css; document.head.appendChild(style);
   let current = null;
@@ -29,6 +41,11 @@
   let statusMessage = "结果由 Lovart 生成，本地工作台负责展示与继续编辑。";
   let statusError = false;
   let rendering = false;
+  let projectLocator = "";
+  let activeProject = null;
+  let projectsLoaded = false;
+  let projectLoading = false;
+  let generationPending = false;
 
   const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[character]));
   const panel = () => document.querySelector(".live-result-panel");
@@ -37,6 +54,192 @@
   const projectUrl = (id) => `https://www.lovart.ai/canvas?projectId=${encodeURIComponent(id)}`;
   const jobForArtifact = (state, artifact) => (state.jobs || []).find((job) => job.id === artifact.job_id) || state.jobs?.at(-1) || null;
   const dateLabel = (value) => { const date = value ? new Date(value) : null; return date && !Number.isNaN(date.getTime()) ? date.toLocaleString() : "时间未知"; };
+  const isLiveWorkbench = () => new URLSearchParams(window.location.search).get("imvia") === "live";
+  const randomKey = (prefix) => globalThis.crypto?.randomUUID?.() || `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  async function apiJson(path, options = {}) {
+    const response = await fetch(path, { ...options, headers: { "content-type": "application/json", ...(options.headers || {}) } });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.ok === false) {
+      const error = new Error(payload.error?.message || `请求失败（${response.status}）`);
+      error.code = payload.error?.code || "UPSTREAM_UNAVAILABLE";
+      throw error;
+    }
+    return payload.data ?? payload;
+  }
+
+  function showWorkbenchToast(message, error = false) {
+    let toast = document.getElementById("imvia-workbench-toast");
+    if (!toast) { toast = document.createElement("div"); toast.id = "imvia-workbench-toast"; document.body.appendChild(toast); }
+    toast.className = error ? "error" : "";
+    toast.textContent = message;
+    window.clearTimeout(Number(toast.dataset.timer || 0));
+    toast.dataset.timer = String(window.setTimeout(() => toast.remove(), 4200));
+  }
+
+  function projectContextStatus(message = null, error = false) {
+    const status = document.querySelector("#imvia-project-context .imvia-project-status");
+    if (!status) return;
+    status.textContent = message || (activeProject
+      ? `当前项目：${activeProject.name || activeProject.project_id}`
+      : "留空：首次生成会自动新建项目，之后沿用当前项目。");
+    status.style.color = error ? "#e49b9b" : "";
+  }
+
+  function injectProjectContext() {
+    if (!isLiveWorkbench()) return;
+    const scroll = document.querySelector(".creator-scroll");
+    if (!scroll || scroll.querySelector("#imvia-project-context")) return;
+    const section = document.createElement("section");
+    section.id = "imvia-project-context";
+    section.innerHTML = `<div class="imvia-project-head"><strong>项目位置</strong><span>可选</span></div><div class="imvia-project-row"><input aria-label="Lovart项目地址" placeholder="留空：自动新建并沿用当前项目"><button type="button">保存项目地址</button></div><small class="imvia-project-status">留空：首次生成会自动新建项目，之后沿用当前项目。</small>`;
+    const referenceSection = scroll.querySelector(".references-section");
+    if (referenceSection) referenceSection.before(section); else scroll.prepend(section);
+    const input = section.querySelector("input");
+    const button = section.querySelector("button");
+    input.value = projectLocator;
+    button.addEventListener("click", () => saveProjectFromField());
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); saveProjectFromField(); } });
+    projectContextStatus();
+  }
+
+  function updateProjectContext() {
+    const input = document.querySelector("#imvia-project-context input");
+    if (input && document.activeElement !== input) input.value = projectLocator;
+    projectContextStatus();
+  }
+
+  async function loadProjectContext() {
+    if (!isLiveWorkbench() || projectsLoaded || projectLoading) return;
+    projectLoading = true;
+    try {
+      const data = await apiJson("/api/v1/lovart/projects", { method: "GET", headers: {} });
+      const projects = Array.isArray(data.projects) ? data.projects : [];
+      activeProject = projects.find((project) => project.project_id === data.active_lovart_project_id) || null;
+      projectLocator = activeProject?.canvas_url || "";
+      projectsLoaded = true;
+      updateProjectContext();
+    } catch (error) {
+      projectContextStatus(error.message || "项目状态读取失败", true);
+    } finally {
+      projectLoading = false;
+    }
+  }
+
+  async function saveProjectFromField() {
+    const input = document.querySelector("#imvia-project-context input");
+    const button = document.querySelector("#imvia-project-context button");
+    if (!input || !button || projectLoading) return;
+    const locator = input.value.trim();
+    if (!locator) {
+      projectLocator = "";
+      projectContextStatus("留空：生成时沿用当前项目；没有当前项目时自动新建。", false);
+      showWorkbenchToast("已设置为自动选择项目");
+      return;
+    }
+    projectLoading = true; button.disabled = true; projectContextStatus("正在验证 Lovart 项目地址…");
+    try {
+      activeProject = await apiJson("/api/v1/lovart/projects/select", { method: "POST", body: JSON.stringify({ locator, source: "user_selected" }) });
+      projectLocator = activeProject?.canvas_url || locator;
+      projectsLoaded = true;
+      updateProjectContext();
+      showWorkbenchToast("Lovart 项目已选定，后续生成会沿用它");
+    } catch (error) {
+      projectContextStatus(error.message || "项目地址无效", true);
+      showWorkbenchToast(error.message || "项目地址无效，请检查后重试", true);
+    } finally {
+      projectLoading = false; button.disabled = false;
+    }
+  }
+
+  async function ensureProjectSelected() {
+    const input = document.querySelector("#imvia-project-context input");
+    const locator = input?.value?.trim() || "";
+    if (!locator || locator === projectLocator) return;
+    await saveProjectFromField();
+    if (!projectLocator) throw new Error("项目地址未保存");
+  }
+
+  function readGenerationInput() {
+    const prompt = document.querySelector(".prompt-box textarea")?.value?.trim() || "";
+    const tabText = document.querySelector(".creation-tabs button.active")?.textContent || "";
+    const mode = tabText.includes("视频") ? "video" : "image";
+    const model = document.querySelector(".model-section .select-box")?.textContent?.replace(/\s+/gu, " ").trim() || "";
+    const attachments = [];
+    for (const media of document.querySelectorAll(".references-section .reference-thumb img,.references-section .reference-thumb video,.references-section .reference-thumb audio")) {
+      const source = media.getAttribute("src") || media.getAttribute("poster") || "";
+      if (!source) continue;
+      if (source.startsWith("blob:")) throw new Error("本地上传素材需先保存到素材库后才能发送给 Lovart");
+      let pathname;
+      try { pathname = new URL(source, window.location.origin).pathname; } catch { continue; }
+      if (pathname.startsWith("/assets/")) attachments.push(`imvia-workbench:${pathname}`);
+    }
+    return { prompt, mode, model, attachments };
+  }
+
+  async function submitLiveGeneration(button) {
+    if (generationPending) return;
+    const input = readGenerationInput();
+    if (!input.prompt) { showWorkbenchToast("请先填写创意描述", true); return; }
+    generationPending = true; button.disabled = true; const originalText = button.textContent; button.textContent = "正在提交 Lovart 任务…";
+    try {
+      await ensureProjectSelected();
+      const prefer_models = input.model ? { [input.mode]: [input.model] } : undefined;
+      const payload = { prompt: input.prompt, mode: input.mode, attachments: input.attachments, idempotency_key: randomKey("workbench-generation"), ...(prefer_models ? { prefer_models } : {}) };
+      const result = await apiJson("/api/v1/generations", { method: "POST", body: JSON.stringify(payload) });
+      if (result.status === "awaiting_cost_confirmation") showWorkbenchToast("任务等待费用确认，请在当前 Codex 会话中明确确认");
+      else showWorkbenchToast("Lovart 任务已提交，结果会自动显示在右侧");
+      await load();
+      projectsLoaded = false;
+      await loadProjectContext();
+    } catch (error) {
+      showWorkbenchToast(error.message || "Lovart 任务提交失败", true);
+    } finally {
+      generationPending = false; button.disabled = false; button.textContent = originalText;
+    }
+  }
+
+  function installLiveGenerationAction() {
+    if (!isLiveWorkbench() || document.documentElement.dataset.imviaGenerationActionInstalled) return;
+    document.documentElement.dataset.imviaGenerationActionInstalled = "true";
+    document.addEventListener("click", (event) => {
+      const button = event.target?.closest?.(".primary-action");
+      if (!button || !document.querySelector(".creator-panel")) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      submitLiveGeneration(button).catch(() => {});
+    }, true);
+  }
+
+  function installReferenceInsertionFix() {
+    if (!isLiveWorkbench() || document.documentElement.dataset.imviaReferenceInsertionFixInstalled) return;
+    document.documentElement.dataset.imviaReferenceInsertionFixInstalled = "true";
+    const placeCaretAfterReference = (event) => {
+      const textarea = event.target?.closest?.(".prompt-box textarea") || (event.target?.closest?.(".prompt-highlights") ? document.querySelector(".prompt-box textarea") : null);
+      if (!textarea || event.target?.closest?.(".prompt-token-remove")) return;
+      const tokens = Array.from(document.querySelectorAll(".prompt-highlights .prompt-token"));
+      if (!tokens.length) return;
+      const point = { x: event.clientX, y: event.clientY };
+      const token = tokens.find((candidate) => { const rect = candidate.getBoundingClientRect(); return point.x >= rect.left - 4 && point.x <= rect.right + 18 && point.y >= rect.top - 4 && point.y <= rect.bottom + 4; });
+      if (!token) return;
+      const label = token.querySelector(".prompt-token-remove")?.getAttribute("aria-label")?.replace(/^删除引用\s*/u, "").trim();
+      if (!label) return;
+      const raw = textarea.value || "";
+      let cursor = 0; let end = -1;
+      for (const candidate of tokens) {
+        const candidateLabel = candidate.querySelector(".prompt-token-remove")?.getAttribute("aria-label")?.replace(/^删除引用\s*/u, "").trim();
+        if (!candidateLabel) continue;
+        const index = raw.indexOf(`@${candidateLabel}`, cursor);
+        if (index < 0) continue;
+        end = index + candidateLabel.length + 1;
+        cursor = end;
+        if (candidate === token) break;
+      }
+      if (end < 0) return;
+      event.preventDefault(); event.stopImmediatePropagation(); textarea.focus(); textarea.setSelectionRange(end, end);
+    };
+    document.addEventListener("mousedown", placeCaretAfterReference, true);
+    document.addEventListener("click", placeCaretAfterReference, true);
+  }
 
   function place(element) {
     const target = panel(); if (!target || !element) return;
@@ -97,9 +300,23 @@
     catch { /* The empty panel remains untouched when the local API is unavailable. */ }
   }
 
+  function enhanceWorkbench() {
+    if (!isLiveWorkbench()) return;
+    injectProjectContext();
+    installLiveGenerationAction();
+    installReferenceInsertionFix();
+    loadProjectContext();
+  }
+
   const reposition = () => { const element = document.getElementById(rootId); if (element) place(element); };
   window.addEventListener("resize", reposition); window.addEventListener("scroll", reposition, true);
-  const observer = new MutationObserver(() => { if (!rendering && current?.artifacts?.length) window.requestAnimationFrame(() => render(current)); });
+  const observer = new MutationObserver(() => {
+    enhanceWorkbench();
+    if (!rendering && current?.artifacts?.length) window.requestAnimationFrame(() => render(current));
+  });
   observer.observe(document.body, { childList: true, subtree: true });
-  window.setInterval(load, 2000); window.addEventListener("load", load); load();
+  window.setInterval(() => { enhanceWorkbench(); load(); }, 2000);
+  window.addEventListener("load", () => { enhanceWorkbench(); load(); });
+  enhanceWorkbench();
+  load();
 })();
