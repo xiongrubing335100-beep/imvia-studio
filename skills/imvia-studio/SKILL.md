@@ -59,6 +59,8 @@ wait for an explicit current-session acceptance before calling
 or expose credential values. The existing Lovart plugin remains independent:
 do not import, execute, configure, reconnect, or modify it.
 
-On macOS, the launcher automatically reuses the active system HTTPS proxy
-provided by the user's VPN when one is configured; do not ask the user to
-disable their VPN or enter proxy settings into chat.
+The launcher uses a portable proxy policy: `IMVIA_PROXY_MODE=auto` (the
+default) honors standard proxy variables, then uses the macOS system HTTPS
+proxy only when no standard proxy is present, and otherwise connects directly.
+`direct`, `env`, and `system` modes are available for explicit deployments. Do
+not ask the user to disable a VPN or enter proxy settings into chat.
