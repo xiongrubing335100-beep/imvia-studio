@@ -29,12 +29,15 @@
 
 - Create: `src/domain/lovart-project-context.js` — pure project locator normalization and selection helpers.
 - Create: `src/lovart/project-context-service.js` — project validation, creation, registry update, and active-project resolution.
+- Create: `src/lovart/artifact-transfer.js` — managed local-reference upload preparation and result download into the IMVIA data directory.
 - Create: `src/lovart/generation-orchestrator.js` — shared direct-generation submission, execution, recovery, and redacted job result mapping.
 - Create: `test/lovart-project-context.test.mjs` — pure locator and selection tests.
 - Create: `test/lovart-project-service.test.mjs` — fake-client project lifecycle tests.
+- Create: `test/lovart-artifact-transfer.test.mjs` — fake upload/download and managed-path tests.
 - Create: `test/lovart-generation-orchestrator.test.mjs` — fake-Lovart end-to-end orchestration tests.
 - Create: `test/lovart-routing-policy.test.mjs` — provider activation and continuation tests.
 - Modify: `src/domain/workbench-service.js` — schema version, migration, registry operations, live job snapshots, and live-safe transitions.
+- Modify: `src/persistence/json-store.js` — optional state migration hook and private pre-replacement backup support.
 - Modify: `src/domain/source-policy.js` — preserve fixture-only rules while adding explicitly named live IMVIA sources.
 - Modify: `src/lovart/client.js` — project create/validate requests and stable response handling.
 - Modify: `src/lovart/generation-service.js` — expose gateway operations needed by the orchestrator without changing credential behavior.
@@ -48,6 +51,7 @@
 - Modify: `test/mcp-health.test.mjs` — tool inventory only when the approved schema changes require it.
 - Modify: `test/http-server.test.mjs` — project and direct-generation route tests.
 - Modify: `test/workbench-service.test.mjs` — state migration and live snapshot tests.
+- Modify: `test/json-store.test.mjs` — migration backup, failure preservation, and atomic replacement tests.
 
 ### Later plans, created after Phase 1 passes
 
@@ -161,8 +165,10 @@ git commit -m "feat: add Lovart project locator policy"
 
 **Files:**
 - Modify: `src/domain/workbench-service.js`
+- Modify: `src/persistence/json-store.js`
 - Test: `test/workbench-service.test.mjs`
 - Test: `test/lovart-project-service.test.mjs`
+- Test: `test/json-store.test.mjs`
 
 **Interfaces:**
 - `service.getLovartProjects() -> { active_lovart_project_id, projects }`.
@@ -189,7 +195,7 @@ const selected = await service.setLovartProject({
 assert.equal(selected.active_project.project_id, "project-1");
 ```
 
-Create a legacy schema `"1"` fixture with `projects[0].lovart_project_id = "legacy-project"`, reload the service, and assert that the registry contains the legacy project, the local project remains intact, and a private backup is created before replacement.
+Create a legacy schema `"1"` fixture with `projects[0].lovart_project_id = "legacy-project"`, reload the service, and assert that the registry contains the legacy project, the local project remains intact, and a private backup is created before replacement. Add a `JsonStore` migration test asserting a failing migration leaves the original `state.json` byte-for-byte unchanged and does not leave a partial replacement.
 
 - [ ] **Step 2: Run focused tests to verify RED**
 
@@ -199,15 +205,19 @@ node --test test/workbench-service.test.mjs test/lovart-project-service.test.mjs
 
 Expected: FAIL because the registry, schema version, and migration are absent.
 
-- [ ] **Step 3: Implement initial schema and migration**
+- [ ] **Step 3: Implement the JsonStore migration hook**
+
+Add an optional constructor callback `migrateState(state) -> { state, changed }`. Apply it while holding the existing state lock. When `changed` is true, write a private `state.json.backup-v<old>-to-v<new>` copy with mode `0600`, validate the migrated JSON, and atomically replace the state. If the callback or validation fails, release the lock and leave the original state untouched.
+
+- [ ] **Step 4: Implement initial schema and migration**
 
 Add `lovart_projects` and `active_lovart_project_id` to `createInitialState`. Add a load-time migration that clones the old document, imports each non-empty `projects[].lovart_project_id`, validates the result, and atomically replaces the state only after validation. On any migration error, preserve the original state and surface `STATE_MIGRATION_FAILED`.
 
-- [ ] **Step 4: Implement registry operations**
+- [ ] **Step 5: Implement registry operations**
 
 Validate all project IDs through `normalizeLovartProjectLocator` before persistence. Store only normalized IDs and official canvas URLs. `setLovartProject` updates `last_used_at`, the active ID, and an audit event; it does not mutate existing job snapshots.
 
-- [ ] **Step 5: Run focused and full domain tests**
+- [ ] **Step 6: Run focused and full domain tests**
 
 ```bash
 node --test test/workbench-service.test.mjs test/lovart-project-context.test.mjs test/iteration.test.mjs test/cost-confirmation.test.mjs
@@ -215,7 +225,7 @@ node --test test/workbench-service.test.mjs test/lovart-project-context.test.mjs
 
 Expected: PASS, including all existing fixture iteration and cost tests.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add src/domain/workbench-service.js test/workbench-service.test.mjs test/lovart-project-service.test.mjs
@@ -234,6 +244,7 @@ git commit -m "feat: persist active Lovart project context"
 **Interfaces:**
 - `client.createProject({ project_name? }) -> { project_id, project_name? }` using `POST /v1/openapi/project/save` with an empty project ID.
 - `client.validateProject({ project_id }) -> { valid, project_name? }` using `GET /v1/openapi/project/validate`.
+- `client.upload({ file_path }) -> { url }` using the signed multipart `POST /v1/openapi/file/upload` request.
 - `projectContextService.list() -> { active_lovart_project_id, projects }`.
 - `projectContextService.select({ locator, source }) -> project` validates upstream before changing active state.
 - `projectContextService.create({ name? }) -> project` creates upstream, validates the returned ID, persists it, and selects it.
@@ -272,6 +283,49 @@ Expected: PASS with zero live network calls.
 ```bash
 git add src/lovart/client.js src/lovart/generation-service.js src/lovart/project-context-service.js test/lovart-client.test.mjs test/lovart-project-service.test.mjs
 git commit -m "feat: add fake-tested Lovart project gateway"
+```
+
+### Task 3A: Add managed artifact transfer
+
+**Files:**
+- Create: `src/lovart/artifact-transfer.js`
+- Test: `test/lovart-artifact-transfer.test.mjs`
+- Modify: `src/lovart/client.js` only for the multipart upload method described in Task 3.
+
+**Interfaces:**
+- `createArtifactTransfer({ dataDirectory, fetchImpl, readFileImpl })` returns:
+  - `prepareUpload({ local_path }) -> { file_path, filename, size_bytes }` after managed-root, regular-file, size, and MIME/signature validation;
+  - `downloadResults({ job_id, result }) -> [{ kind, source_url, local_path, mime_type, source_artifact_id }]` with all paths under the managed results directory.
+
+- [ ] **Step 1: Write failing transfer tests**
+
+Assert a managed image is accepted, a path outside the data directory is rejected with `PATH_NOT_ALLOWED`, a directory and symlink are rejected, an oversized file is rejected, HTTP URLs are rejected, redirects are rejected, and a fake HTTPS result is written below `dataDirectory/results/<job_id>/` with a deterministic hash-based filename.
+
+- [ ] **Step 2: Run the focused transfer test to verify RED**
+
+```bash
+node --test test/lovart-artifact-transfer.test.mjs
+```
+
+Expected: FAIL because the transfer module does not exist.
+
+- [ ] **Step 3: Implement managed transfer**
+
+Use the existing managed-root policy from `importResult`, `readFile`/`lstat`, a fixed request body limit, `redirect: "error"`, HTTPS-only result URLs, and atomic temporary-file rename. Never place credentials in download headers.
+
+- [ ] **Step 4: Run transfer and security tests**
+
+```bash
+node --test test/lovart-artifact-transfer.test.mjs test/lovart-client.test.mjs test/lovart-connection-security.test.mjs
+```
+
+Expected: PASS with fake transport only.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/lovart/artifact-transfer.js src/lovart/client.js test/lovart-artifact-transfer.test.mjs test/lovart-client.test.mjs
+git commit -m "feat: transfer Lovart artifacts through managed paths"
 ```
 
 ### Task 4: Permit explicit live IMVIA job evidence without weakening fixtures
