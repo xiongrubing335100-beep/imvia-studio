@@ -52,6 +52,8 @@ test("create validates and activates a newly created project", async (context) =
 test("resolve chooses explicit, active, then creates once", async (context) => {
   const { calls, service } = await createContext(context);
   assert.deepEqual(await service.resolve({ explicit_locator: "project-1" }), { project_id: "project-1", source: "explicit" });
+  assert.equal((await service.list()).active_lovart_project_id, null);
+  await service.select({ locator: "project-1", source: "user_selected" });
   assert.deepEqual(await service.resolve({}), { project_id: "project-1", source: "active" });
   const fresh = await createContext(context);
   assert.deepEqual(await fresh.service.resolve({}), { project_id: "project-1", source: "auto_create" });

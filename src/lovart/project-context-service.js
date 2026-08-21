@@ -57,14 +57,21 @@ export function createProjectContextService({ workbenchService, generationServic
     return result.active_project;
   }
 
-  async function resolve({ explicit_locator = null } = {}) {
+  async function resolve({ explicit_locator = null, select_explicit = false } = {}) {
     const current = await list();
     const choice = chooseLovartProject({
       explicit_project_id: explicit_locator ? normalizeLovartProjectLocator(explicit_locator).project_id : null,
       active_project_id: current.active_lovart_project_id,
     });
     if (choice.source === "explicit") {
-      await select({ locator: explicit_locator, source: "explicit" });
+      const normalized = normalizeLovartProjectLocator(explicit_locator);
+      const validation = await generationService.validateProject({ project_id: normalized.project_id });
+      if (validation?.valid !== true) throw upstreamProjectError(normalized.project_id);
+      if (select_explicit) {
+        await workbenchService.setLovartProject({ project_id: normalized.project_id, canvas_url: normalized.canvas_url, name: validation.project_name || null, source: "explicit" });
+      } else {
+        await workbenchService.recordLovartProject({ project_id: normalized.project_id, canvas_url: normalized.canvas_url, name: validation.project_name || null, source: "explicit" });
+      }
       return choice;
     }
     if (choice.source === "active") return choice;

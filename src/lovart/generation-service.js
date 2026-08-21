@@ -66,6 +66,15 @@ export function createGenerationService({
     }
   }
 
+  async function resume({ thread_id: threadId, project_id: projectId = null }) {
+    if (typeof threadId !== "string" || !threadId) throw new Error("Lovart thread is required");
+    try {
+      return await pollResult(await clientForOperation(), threadId, projectId);
+    } catch (error) {
+      throw stableError(error);
+    }
+  }
+
   async function confirm(input) {
     let client;
     try {
@@ -101,5 +110,5 @@ export function createGenerationService({
     }
   }
 
-  return Object.freeze({ connect, generate, confirm, createProject, validateProject, upload });
+  return Object.freeze({ connect, generate, resume, confirm, createProject, validateProject, upload });
 }

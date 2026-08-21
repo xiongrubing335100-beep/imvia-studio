@@ -3,7 +3,7 @@ import { lstat, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { DomainError } from "../domain/errors.js";
 
-const URL_FIELDS = ["url", "download_url", "image_url", "video_url", "audio_url", "artifact_url"];
+const URL_FIELDS = ["url", "download_url", "image_url", "video_url", "audio_url", "artifact_url", "content"];
 
 function managedPath(dataDirectory, localPath) {
   if (typeof localPath !== "string" || !path.isAbsolute(localPath)) {
