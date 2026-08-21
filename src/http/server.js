@@ -1,5 +1,19 @@
 import { createServer } from "node:http";
+import { readFile, stat } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createWorkbenchService, DomainError } from "../domain/workbench-service.js";
+
+const DEFAULT_WORKBENCH_DIRECTORY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../workbench/dist");
+const WORKBENCH_MIME_TYPES = Object.freeze({
+  ".css": "text/css; charset=utf-8",
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".webp": "image/webp",
+});
 
 function body(request) {
   return new Promise((resolve, reject) => {
@@ -13,6 +27,34 @@ function send(response, status, payload) { response.writeHead(status, { "content
 function envelope(data) { return { api_version: "1", ok: true, data }; }
 function errorPayload(error) { const known = error instanceof DomainError; return { api_version: "1", ok: false, error: { code: known ? error.code : "STORE_UNAVAILABLE", message: known ? error.message : "Local workbench service is unavailable.", retryable: known && ["REVISION_CONFLICT", "STATUS_CONFLICT"].includes(error.code), details: known ? error.details : {} } }; }
 
+async function serveWorkbench(response, pathname, workbenchDirectory) {
+  let relativePath;
+  if (pathname === "/workbench" || pathname === "/workbench/") relativePath = "index.html";
+  else if (pathname.startsWith("/assets/")) relativePath = pathname.slice(1);
+  else return false;
+
+  const root = path.resolve(workbenchDirectory);
+  const candidate = path.resolve(root, relativePath);
+  if (candidate !== root && !candidate.startsWith(`${root}${path.sep}`)) {
+    send(response, 404, { api_version: "1", ok: false, error: { code: "NOT_FOUND", message: "Workbench asset not found.", retryable: false, details: {} } });
+    return true;
+  }
+  try {
+    const metadata = await stat(candidate);
+    if (!metadata.isFile()) return false;
+    const contents = await readFile(candidate);
+    response.writeHead(200, {
+      "content-type": WORKBENCH_MIME_TYPES[path.extname(candidate).toLowerCase()] || "application/octet-stream",
+      "cache-control": path.basename(candidate) === "index.html" ? "no-store" : "public, max-age=31536000, immutable",
+    });
+    response.end(contents);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 function errorStatus(error) {
   if (!(error instanceof DomainError)) return 400;
   if (["REVISION_CONFLICT", "STATUS_CONFLICT"].includes(error.code)) return 409;
@@ -20,7 +62,7 @@ function errorStatus(error) {
   return 400;
 }
 
-export async function startHttpServer({ dataDirectory, service: providedService, port = 4190 } = {}) {
+export async function startHttpServer({ dataDirectory, service: providedService, port = 4190, workbenchDirectory = DEFAULT_WORKBENCH_DIRECTORY } = {}) {
   const service = providedService || createWorkbenchService({ dataDirectory });
   const eventClients = new Set();
   let eventId = 0;
@@ -33,6 +75,12 @@ export async function startHttpServer({ dataDirectory, service: providedService,
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url, "http://127.0.0.1");
+      if (request.method === "GET" && url.pathname === "/") {
+        response.writeHead(302, { location: "/workbench?imvia=live", "cache-control": "no-store" });
+        response.end();
+        return;
+      }
+      if (request.method === "GET" && await serveWorkbench(response, url.pathname, workbenchDirectory)) return;
       if (request.method === "GET" && url.pathname === "/api/v1/health") return send(response, 200, envelope({ status: "ok", bind: "127.0.0.1" }));
       if (request.method === "GET" && url.pathname === "/api/v1/state") {
         const include = (url.searchParams.get("include") || "").split(",").filter((value) => ["jobs", "artifacts"].includes(value));
@@ -70,5 +118,6 @@ export async function startHttpServer({ dataDirectory, service: providedService,
   });
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen({ host: "127.0.0.1", port }, resolve); });
   const address = server.address();
-  return { host: "127.0.0.1", url: `http://127.0.0.1:${address.port}`, close: () => new Promise((resolve, reject) => { unsubscribe(); for (const client of eventClients) client.end(); server.close((error) => error ? reject(error) : resolve()); }) };
+  const url = `http://127.0.0.1:${address.port}`;
+  return { host: "127.0.0.1", url, workbenchUrl: `${url}/workbench?imvia=live`, close: () => new Promise((resolve, reject) => { unsubscribe(); for (const client of eventClients) client.end(); server.close((error) => error ? reject(error) : resolve()); }) };
 }

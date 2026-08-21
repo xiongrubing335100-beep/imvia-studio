@@ -5,6 +5,17 @@ description: Run IMVIA Studio's fixture-only Milestone 5 mock orchestration, opt
 
 # IMVIA Studio
 
+## Open the web workbench
+
+When the user asks to open, launch, or use IMVIA Studio, call
+`imvia_open_workbench` with `{}`. It returns a local `workbench_url`.
+Immediately call `codex_app__open_in_codex` with
+`{ placement: "right", target: { type: "browser", url: workbench_url } }`.
+This opens the bundled IMVIA Studio workbench in Codex's right-side browser
+panel. Do not ask the user to start a terminal, paste a URL, or run a local
+server command. The page uses the same local IMVIA state and HTTP/SSE service
+as the MCP tools. The original Lovart plugin remains independent.
+
 ## Milestone 5 fixture-only gate
 
 Never call an installed or real Lovart MCP tool in Milestone 5. Use only a test-provided adapter explicitly labelled `fixture` or `mock_lovart`. If no such adapter is present, stop and report that Milestone 5 cannot execute. Never inspect, configure, reconnect, or fall back to Lovart, and never read credentials.

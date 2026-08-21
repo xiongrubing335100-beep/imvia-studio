@@ -31,7 +31,7 @@ test("MCP reads, patches, prepares, and lists only its local workbench state", a
   const tools = await client.listTools();
   assert.deepEqual(
     tools.tools.map((tool) => tool.name).sort(),
-    ["imvia_authorize_lovart_probe", "imvia_claim_cost_decision", "imvia_confirm_generation", "imvia_connect_lovart", "imvia_create_iteration", "imvia_generate", "imvia_get_account_status", "imvia_get_state", "imvia_health", "imvia_import_result", "imvia_list_pending_jobs", "imvia_lovart_status", "imvia_patch_workbench", "imvia_prepare_generation", "imvia_probe_lovart_capabilities", "imvia_record_cost_decision", "imvia_update_account_status", "imvia_update_job"],
+    ["imvia_authorize_lovart_probe", "imvia_claim_cost_decision", "imvia_confirm_generation", "imvia_connect_lovart", "imvia_create_iteration", "imvia_generate", "imvia_get_account_status", "imvia_get_state", "imvia_health", "imvia_import_result", "imvia_list_pending_jobs", "imvia_lovart_status", "imvia_open_workbench", "imvia_patch_workbench", "imvia_prepare_generation", "imvia_probe_lovart_capabilities", "imvia_record_cost_decision", "imvia_update_account_status", "imvia_update_job"],
   );
 
   const initial = await client.callTool({ name: "imvia_get_state", arguments: {} });

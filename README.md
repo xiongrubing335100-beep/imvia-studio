@@ -18,6 +18,15 @@ only standard proxy variables, or `system` to use only the macOS system proxy.
 > generate, confirm a cost, or contact Lovart. A user must explicitly choose
 > the connection or creation action in the current workbench session.
 
+## Open the bundled workbench
+
+The plugin includes the existing IMVIA Studio web workbench as an independent
+static bundle. When a user asks to open or use IMVIA Studio, call
+`imvia_open_workbench`, then open its returned `workbench_url` in Codex's
+right-side browser panel. The bundled page is served by the same loopback
+service as the MCP and uses the live local adapter (`?imvia=live`). No
+terminal, URL copy/paste, or separate frontend server is required.
+
 ## Architecture and scope
 
 The existing workbench path remains local and fixture-only:
@@ -73,7 +82,7 @@ identifiers are ignored.
 
 ## Tool inventory
 
-The MCP server exposes exactly 18 tools. The original 12 retain their schemas
+The MCP server exposes exactly 19 tools. The original 12 retain their schemas
 and fixture-only behavior:
 
 - `imvia_claim_cost_decision`
@@ -100,6 +109,10 @@ Milestone 7 adds the no-terminal user flow:
 - `imvia_lovart_status`
 - `imvia_generate`
 - `imvia_confirm_generation`
+
+The workbench entry point is:
+
+- `imvia_open_workbench`
 
 ## No-terminal Lovart workflow
 

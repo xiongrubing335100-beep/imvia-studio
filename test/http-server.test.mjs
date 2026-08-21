@@ -33,6 +33,30 @@ test("loopback HTTP server reads and revision-patches the same local workbench s
   assert.equal((await conflict.json()).error.code, "REVISION_CONFLICT");
 });
 
+test("loopback HTTP server serves the bundled live IMVIA Studio workbench", async (context) => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-workbench-ui-"));
+  const server = await startHttpServer({ dataDirectory, port: 0 });
+  context.after(async () => { await server.close(); await rm(dataDirectory, { recursive: true, force: true }); });
+
+  assert.match(server.workbenchUrl, /^http:\/\/127\.0\.0\.1:\d+\/workbench\?imvia=live$/);
+  const page = await fetch(server.workbenchUrl);
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get("content-type") || "", /text\/html/);
+  const html = await page.text();
+  assert.match(html, /<div id="root"><\/div>/);
+  const scriptPath = html.match(/src="([^"]+\.js)"/)?.[1];
+  assert.ok(scriptPath);
+
+  const script = await fetch(`${server.url}${scriptPath}`);
+  assert.equal(script.status, 200);
+  assert.match(script.headers.get("content-type") || "", /javascript/);
+  assert.match(await script.text(), /IMVIA Studio/);
+
+  const root = await fetch(server.url, { redirect: "manual" });
+  assert.equal(root.status, 302);
+  assert.equal(root.headers.get("location"), "/workbench?imvia=live");
+});
+
 test("SSE emits the updated draft revision after a local patch", async (context) => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-sse-"));
   const server = await startHttpServer({ dataDirectory, port: 0 });

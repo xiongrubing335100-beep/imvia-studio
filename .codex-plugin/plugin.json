@@ -1,6 +1,6 @@
 {
   "name": "imvia-studio",
-  "version": "0.3.0",
+  "version": "0.3.0+codex.20260821060721",
   "description": "Independent local IMVIA Studio MCP with one-click Lovart connection and explicit creation controls.",
   "author": {
     "name": "IMVIA Studio"
@@ -12,8 +12,23 @@
     "longDescription": "IMVIA Studio provides isolated local MCP, JSON state, task lifecycle, managed result import, loopback HTTP/SSE services, a secure no-terminal Lovart connection flow, and explicit creation/cost confirmation controls. The existing Lovart plugin remains independent.",
     "developerName": "IMVIA Studio",
     "category": "Creativity",
-    "capabilities": ["Local workbench state", "Revision-safe editing", "Task snapshots", "Sourced job lifecycle", "Managed result import", "Loopback HTTP and SSE", "One-click Lovart connection", "Explicit Lovart creation and cost confirmation", "Optional default-disabled read-only Lovart probe"],
-    "defaultPrompt": ["Check the IMVIA Studio MCP health."]
+    "capabilities": [
+      "Interactive web workbench",
+      "Local workbench state",
+      "Revision-safe editing",
+      "Task snapshots",
+      "Sourced job lifecycle",
+      "Managed result import",
+      "Loopback HTTP and SSE",
+      "One-click Lovart connection",
+      "Explicit Lovart creation and cost confirmation",
+      "Optional default-disabled read-only Lovart probe"
+    ],
+    "defaultPrompt": [
+      "Open the IMVIA Studio workbench",
+      "Connect Lovart from the IMVIA Studio workbench",
+      "Check the IMVIA Studio MCP health."
+    ]
   },
   "mcpServers": "./.mcp.json"
 }

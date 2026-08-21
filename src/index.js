@@ -147,6 +147,21 @@ export function createServer({
     },
     async () => toMcpResponse(healthResponse(httpService)),
   );
+  server.registerTool(
+    "imvia_open_workbench",
+    {
+      description: "Return the local IMVIA Studio web workbench URL for opening in Codex's right-side browser panel.",
+      inputSchema: z.object({}).strict(),
+    },
+    async () => {
+      const workbenchUrl = httpService?.workbench_url || httpService?.workbenchUrl || `http://127.0.0.1:${httpService?.port ?? configuredPort()}/workbench?imvia=live`;
+      return toMcpResponse({
+        api_version: "1",
+        ok: true,
+        data: { workbench_url: workbenchUrl, placement: "right", mode: "live" },
+      });
+    },
+  );
   server.registerTool("imvia_authorize_lovart_probe", {
     description: "Record an explicit current-session authorization for one read-only Lovart capability probe. Does not contact Lovart.",
     inputSchema: authorizeProbeInput,
@@ -296,7 +311,7 @@ export async function startServer() {
   const service = createWorkbenchService({ dataDirectory: stateDirectory });
   const probeService = createProductionProbeService(stateDirectory);
   const http = await startHttpServer({ service, port: configuredPort() });
-  const httpService = { port: Number.parseInt(new URL(http.url).port, 10) };
+  const httpService = { port: Number.parseInt(new URL(http.url).port, 10), url: http.url, workbench_url: http.workbenchUrl };
   const server = createServer({ service, probeService, httpService, dataDirectory: stateDirectory });
   const closeHttp = () => http.close().catch(() => undefined);
   process.stdin.once("end", closeHttp);

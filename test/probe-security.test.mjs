@@ -27,7 +27,7 @@ const reviewedProductionHashes = Object.freeze({
   "src/probe/summary-validator.js": "728d94ed8bdd12b880fa73c59983e98f8076c17262b59c6b02f111b434edc982",
   "src/probe/transport.js": "eb14acf43af1d0a6d86936cb79b5f4acab5f908914eafc2dfaaff843a1ca2f34",
 });
-const reviewedNormalizedIndexHash = "631f287f5b01ea479d6b7b3e9b387105d94c8ac076017aef03a787ec062b500e";
+const reviewedNormalizedIndexHash = "8dae0baac05d98b7fc116b0e8c0305987a5d88619bcde673daf1b06dac7f33b8";
 
 const reviewedImports = Object.freeze({
   "scripts/configure-lovart-readonly.swift": ["AppKit", "Darwin", "Security"],
