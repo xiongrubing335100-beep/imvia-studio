@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { readFile, stat } from "node:fs/promises";
+import { lstat, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createWorkbenchService, DomainError } from "../domain/workbench-service.js";
@@ -30,6 +30,36 @@ function redactedConnection(value) {
   const connected = value?.status === "connected";
   const code = typeof value?.code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(value.code) ? value.code : null;
   return { status: connected ? "connected" : "not_connected", ...(code ? { code } : {}) };
+}
+function redactArtifact(artifact) {
+  if (!artifact || typeof artifact !== "object") return artifact;
+  const { local_path: _localPath, source_url: _sourceUrl, ...safe } = artifact;
+  return { ...safe, content_url: `/api/v1/artifacts/${encodeURIComponent(artifact.id)}/content` };
+}
+function redactJob(job) {
+  if (!job || typeof job !== "object") return job;
+  const safe = { ...job };
+  if (safe.snapshot && typeof safe.snapshot === "object") {
+    safe.snapshot = { ...safe.snapshot, attachments: [] };
+  }
+  return safe;
+}
+function redactState(state) {
+  if (!state || typeof state !== "object") return state;
+  return {
+    ...state,
+    ...(Array.isArray(state.jobs) ? { jobs: state.jobs.map(redactJob) } : {}),
+    ...(Array.isArray(state.artifacts) ? { artifacts: state.artifacts.map(redactArtifact) } : {}),
+  };
+}
+function redactOrchestratorResult(result) {
+  if (!result || typeof result !== "object") return result;
+  return {
+    ...result,
+    ...(result.job ? { job: redactJob(result.job) } : {}),
+    ...(Array.isArray(result.artifacts) ? { artifacts: result.artifacts.map(redactArtifact) } : {}),
+    ...(result.results ? { results: result.results.map((item) => item?.artifact ? { ...item, artifact: redactArtifact(item.artifact) } : item) } : {}),
+  };
 }
 function redirectToWorkbench(response, connection) {
   const query = new URLSearchParams({ imvia: "live", lovart: connection.status });
@@ -136,7 +166,7 @@ export async function startHttpServer({ dataDirectory, service: providedService,
       }
       if (request.method === "GET" && url.pathname === "/api/v1/state") {
         const include = (url.searchParams.get("include") || "").split(",").filter((value) => ["jobs", "artifacts"].includes(value));
-        return send(response, 200, envelope(await service.getState({ include })));
+        return send(response, 200, envelope(redactState(await service.getState({ include }))));
       }
       if (request.method === "GET" && url.pathname === "/api/v1/events") {
         response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
@@ -163,12 +193,40 @@ export async function startHttpServer({ dataDirectory, service: providedService,
       const artifactMatch = url.pathname.match(/^\/api\/v1\/jobs\/([^/]+)\/artifacts$/);
       if (request.method === "POST" && artifactMatch) {
         const imported = await service.importResult({ ...(await body(request)), job_id: decodeURIComponent(artifactMatch[1]) });
-        return send(response, 200, envelope({ job_id: imported.job.id, status: imported.job.status, results: imported.results, idempotent: imported.idempotent }));
+        return send(response, 200, envelope({ job_id: imported.job.id, status: imported.job.status, results: imported.results.map((item) => item?.artifact ? { ...item, artifact: redactArtifact(item.artifact) } : item), idempotent: imported.idempotent }));
+      }
+      const followUpMatch = url.pathname.match(/^\/api\/v1\/jobs\/([^/]+)\/follow-ups$/);
+      if (request.method === "POST" && followUpMatch) {
+        if (!orchestrator?.followUp) throw new DomainError("CONTEXT_UNAVAILABLE", "Lovart follow-up service is unavailable.");
+        const input = await body(request);
+        if (Object.hasOwn(input, "activation")) throw new DomainError("VALIDATION_FAILED", "HTTP workbench actions derive their Lovart activation internally.", { field: "activation" });
+        if (Object.hasOwn(input, "parent_job_id")) throw new DomainError("VALIDATION_FAILED", "The parent job is derived from the URL.", { field: "parent_job_id" });
+        const result = await orchestrator.followUp({
+          ...input,
+          parent_job_id: decodeURIComponent(followUpMatch[1]),
+          activation: { source: "codex_context_continuation", parent_job_id: decodeURIComponent(followUpMatch[1]), artifact_id: input.artifact_id },
+        });
+        return send(response, 202, envelope({ job_id: result.job.id, parent_job_id: decodeURIComponent(followUpMatch[1]), status: result.job.status, idempotent: result.idempotent ?? false }));
+      }
+      const artifactContentMatch = url.pathname.match(/^\/api\/v1\/artifacts\/([^/]+)\/content$/);
+      if (request.method === "GET" && artifactContentMatch) {
+        const state = await service.getState({ include: ["artifacts"] });
+        const artifact = state.artifacts.find((item) => item.id === decodeURIComponent(artifactContentMatch[1]));
+        if (!artifact) throw new DomainError("NOT_FOUND", "The requested artifact does not exist.", { artifact_id: artifactContentMatch[1] });
+        const managedRoot = path.resolve(dataDirectory || path.join(path.dirname(fileURLToPath(import.meta.url)), "../../.imvia-studio-dev"));
+        const candidate = path.resolve(artifact.local_path);
+        if (!candidate.startsWith(`${managedRoot}${path.sep}`)) throw new DomainError("PATH_NOT_ALLOWED", "The artifact is outside the managed directory.");
+        const info = await lstat(candidate);
+        if (!info.isFile() || info.isSymbolicLink()) throw new DomainError("PATH_NOT_ALLOWED", "The artifact is not a managed regular file.");
+        const contents = await readFile(candidate);
+        response.writeHead(200, { "content-type": artifact.mime_type || "application/octet-stream", "cache-control": "no-store", "x-content-type-options": "nosniff" });
+        response.end(contents);
+        return;
       }
       const jobMatch = url.pathname.match(/^\/api\/v1\/jobs\/([^/]+)$/);
       if (request.method === "GET" && jobMatch) {
         if (!orchestrator?.get) throw new DomainError("CONTEXT_UNAVAILABLE", "Lovart generation orchestrator is unavailable.");
-        return send(response, 200, envelope(await orchestrator.get({ job_id: decodeURIComponent(jobMatch[1]) })));
+        return send(response, 200, envelope(redactOrchestratorResult(await orchestrator.get({ job_id: decodeURIComponent(jobMatch[1]) }))));
       }
       const costDecisionMatch = url.pathname.match(/^\/api\/v1\/jobs\/([^/]+)\/cost-decisions$/);
       if (request.method === "POST" && costDecisionMatch) {

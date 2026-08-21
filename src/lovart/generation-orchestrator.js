@@ -6,6 +6,7 @@ const LIVE_SUBMIT = "imvia:lovart_submit";
 const LIVE_STATUS = "imvia:lovart_status";
 const LIVE_IMPORT = "imvia:lovart_import";
 const LIVE_CONFIRM = "imvia:lovart_confirm";
+const LIVE_FOLLOW_UP = "imvia:lovart_submit";
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -35,7 +36,9 @@ export function createGenerationOrchestrator({
   if (!projectContextService?.resolve || !workbenchService?.createDirectGenerationJob || !workbenchService?.updateLiveJob) throw new TypeError("projectContextService and workbenchService are required");
   if (!generationService?.generate || !generationService?.confirm) throw new TypeError("generationService is required");
 
-  async function readJob(jobId) {
+  async function readJob(jobIdOrInput) {
+    const jobId = typeof jobIdOrInput === "string" ? jobIdOrInput : jobIdOrInput?.job_id;
+    if (typeof jobId !== "string" || !jobId) throw new DomainError("VALIDATION_FAILED", "job_id is required.", { field: "job_id" });
     const state = await workbenchService.getState({ include: ["jobs", "artifacts"] });
     const job = state.jobs.find((item) => item.id === jobId);
     if (!job) throw new DomainError("NOT_FOUND", "The requested Lovart generation job does not exist.", { job_id: jobId });
@@ -137,6 +140,59 @@ export function createGenerationOrchestrator({
     }
   }
 
+  async function followUp(input) {
+    if (!input || typeof input.parent_job_id !== "string" || !input.parent_job_id.trim()) throw new DomainError("VALIDATION_FAILED", "parent_job_id is required.", { field: "parent_job_id" });
+    if (typeof input.artifact_id !== "string" || !input.artifact_id.trim()) throw new DomainError("VALIDATION_FAILED", "artifact_id is required.", { field: "artifact_id" });
+    if (typeof input.instruction !== "string" || !input.instruction.trim()) throw new DomainError("VALIDATION_FAILED", "instruction is required.", { field: "instruction" });
+    if (!input.activation || typeof input.activation !== "object") throw new DomainError("VALIDATION_FAILED", "explicit Lovart activation is required.", { field: "activation" });
+    if (!input.idempotency_key || typeof input.idempotency_key !== "string") throw new DomainError("VALIDATION_FAILED", "idempotency_key is required.", { field: "idempotency_key" });
+    const parent = (await readJob(input.parent_job_id)).job;
+    if (!parent.direct_generation || !["succeeded", "partially_succeeded"].includes(parent.status)) {
+      throw new DomainError("STATUS_CONFLICT", "Follow-up requires a successful or partially successful Lovart parent job.", { parent_job_id: parent.id, current_status: parent.status });
+    }
+    const current = await readJob(input.parent_job_id);
+    const artifact = current.artifacts.find((item) => item.id === input.artifact_id);
+    if (!artifact) throw new DomainError("NOT_FOUND", "The selected artifact does not belong to the parent job.", { artifact_id: input.artifact_id, parent_job_id: parent.id });
+    const activation = {
+      source: "codex_context_continuation",
+      parent_job_id: parent.id,
+      artifact_id: artifact.id,
+    };
+    const prepared = await workbenchService.createFollowUpGenerationJob({
+      parent_job_id: parent.id,
+      artifact_id: artifact.id,
+      instruction: input.instruction,
+      activation_source: activation,
+      idempotency_key: input.idempotency_key,
+    });
+    if (prepared.idempotent) return resumeExisting(prepared.job, null, input.idempotency_key);
+    let job = prepared.job;
+    try {
+      await workbenchService.updateLiveJob({ job_id: job.id, expected_status: "queued_for_agent", next_status: "uploading", attempt: job.attempt, source: LIVE_UPLOAD });
+      if (!artifact.local_path || !artifact.local_path.startsWith("/")) throw new DomainError("LOCAL_FILE_UNAVAILABLE", "The selected managed artifact is unavailable for follow-up.", { artifact_id: artifact.id });
+      if (!artifactTransfer?.prepareUpload || typeof generationService.upload !== "function") throw new DomainError("LOCAL_FILE_UNAVAILABLE", "The managed artifact transfer service is unavailable.", { artifact_id: artifact.id });
+      const preparedUpload = await artifactTransfer.prepareUpload({ local_path: artifact.local_path });
+      const uploaded = await generationService.upload(preparedUpload);
+      const prompt = `${parent.snapshot?.prompt?.text ?? ""}\n\n${input.instruction.trim()}`.trim();
+      const canReuseThread = typeof parent.lovart_thread_id === "string"
+        && parent.lovart_thread_id
+        && typeof parent.lovart_thread_source === "string"
+        && parent.lovart_thread_source.startsWith("imvia:lovart_");
+      const result = await generationService.generate({
+        prompt,
+        project_id: parent.lovart_project_id,
+        ...(canReuseThread ? { thread_id: parent.lovart_thread_id } : {}),
+        attachments: [uploaded.url],
+      });
+      const submitted = await workbenchService.updateLiveJob({ job_id: job.id, expected_status: "uploading", next_status: "submitted", attempt: job.attempt, source: LIVE_FOLLOW_UP, lovart_thread_id: result.thread_id });
+      job = submitted.job;
+      return handleResult(job, result, input.idempotency_key);
+    } catch (error) {
+      await markFailed(job, LIVE_STATUS, error);
+      throw error;
+    }
+  }
+
   async function confirm(input) {
     const current = await readJob(input.job_id);
     const job = current.job;
@@ -151,5 +207,5 @@ export function createGenerationOrchestrator({
     return importOrComplete(generating, result, `${job.id}:confirm`);
   }
 
-  return Object.freeze({ submit, get: readJob, confirm });
+  return Object.freeze({ submit, followUp, get: readJob, confirm });
 }

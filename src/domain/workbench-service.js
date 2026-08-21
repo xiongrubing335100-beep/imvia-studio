@@ -595,6 +595,85 @@ export function createWorkbenchService({ dataDirectory }) {
       });
     },
 
+    async createFollowUpGenerationJob({ parent_job_id, artifact_id, instruction, activation_source, idempotency_key }) {
+      if (typeof parent_job_id !== "string" || !parent_job_id.trim()) throw new DomainError("VALIDATION_FAILED", "parent_job_id is required.", { field: "parent_job_id" });
+      if (typeof artifact_id !== "string" || !artifact_id.trim()) throw new DomainError("VALIDATION_FAILED", "artifact_id is required.", { field: "artifact_id" });
+      if (typeof instruction !== "string" || !instruction.trim()) throw new DomainError("VALIDATION_FAILED", "instruction is required.", { field: "instruction" });
+      if (typeof idempotency_key !== "string" || !idempotency_key.trim()) throw new DomainError("VALIDATION_FAILED", "idempotency_key is required.", { field: "idempotency_key" });
+      const activation = clone(activation_source ?? {});
+      assertContinuationParent({ activation_source: activation.source, parent_job_id: activation.parent_job_id, artifact_id: activation.artifact_id });
+      return store.update((state) => {
+        const parent = findJob(state, parent_job_id);
+        if (!parent.direct_generation) throw new DomainError("VALIDATION_FAILED", "Follow-up requires a live Lovart parent job.", { parent_job_id });
+        if (!["succeeded", "partially_succeeded"].includes(parent.status)) throw statusConflict(parent, "Follow-up requires a successful or partially successful parent job.", { parent_job_id });
+        const artifact = findArtifact(state, artifact_id);
+        if (!artifact || artifact.job_id !== parent.id) throw new DomainError("NOT_FOUND", "The selected artifact does not belong to the parent job.", { artifact_id, parent_job_id });
+        if (!parent.lovart_project_id) throw new DomainError("VALIDATION_FAILED", "The parent job has no Lovart project context.", { parent_job_id });
+        const normalizedInstruction = instruction.trim();
+        const lineage = {
+          parent_job_id: parent.id,
+          parent_artifact_id: artifact.id,
+          instruction: normalizedInstruction,
+          activation,
+          project_id: parent.lovart_project_id,
+          created_at: isoNow(),
+          idempotency_key,
+        };
+        const comparable = stableJson({
+          parent_job_id: lineage.parent_job_id,
+          parent_artifact_id: lineage.parent_artifact_id,
+          instruction: lineage.instruction,
+          activation: lineage.activation,
+          project_id: lineage.project_id,
+        });
+        const existing = state.idempotency[idempotency_key];
+        if (existing) {
+          if (existing.operation !== "follow_up_generation" || existing.lineage !== comparable) throw new DomainError("IDEMPOTENCY_CONFLICT", "This idempotency key belongs to a different follow-up request.");
+          return { job: clone(findJob(state, existing.job_id)), idempotent: true };
+        }
+        const now = lineage.created_at;
+        const job = {
+          id: randomUUID(),
+          project_id: parent.project_id,
+          draft_id: null,
+          draft_revision: null,
+          snapshot: {
+            mode: parent.snapshot?.mode ?? null,
+            prompt: { text: parent.snapshot?.prompt?.text ?? "", tokens: clone(parent.snapshot?.prompt?.tokens ?? []) },
+            follow_up_instruction: normalizedInstruction,
+            parent_artifact_id: artifact.id,
+            attachments: [artifact.local_path],
+            prefer_models: clone(parent.snapshot?.prefer_models ?? null),
+            include_tools: clone(parent.snapshot?.include_tools ?? []),
+            lovart_project_id: parent.lovart_project_id,
+            activation: clone(activation),
+          },
+          follow_up: lineage,
+          status: "queued_for_agent",
+          attempt: 1,
+          idempotency_key,
+          direct_generation: true,
+          lovart_project_id: parent.lovart_project_id,
+          activation: clone(activation),
+          lovart_thread_id: null,
+          lovart_thread_source: null,
+          parent_job_id: parent.id,
+          parent_artifact_id: artifact.id,
+          iteration_index: (iterationIndexForParent(parent) + 1),
+          estimated_cost: null,
+          cost_decisions: [],
+          error: null,
+          created_at: now,
+          updated_at: now,
+        };
+        state.jobs.push(job);
+        state.idempotency[idempotency_key] = { operation: "follow_up_generation", job_id: job.id, lineage: comparable };
+        state.updated_at = now;
+        state.audit_events.push({ id: randomUUID(), occurred_at: now, actor: "imvia:lovart_submit", reason: "Lovart follow-up generation job created", changed_fields: ["jobs", "idempotency"] });
+        return { job: clone(job), idempotent: false };
+      });
+    },
+
     async updateLiveJob({
       job_id,
       expected_status,

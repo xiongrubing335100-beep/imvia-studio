@@ -208,6 +208,8 @@ test("HTTP runs the local cost-confirmation fixture and exposes imported artifac
   const state = await fetch(`${server.url}/api/v1/state?include=jobs,artifacts`).then((response) => response.json());
   assert.equal(state.data.jobs[0].status, "succeeded");
   assert.equal(state.data.artifacts[0].source_artifact_id, "fixture-video-001");
+  assert.equal(Object.hasOwn(state.data.artifacts[0], "local_path"), false);
+  assert.equal(state.data.artifacts[0].content_url, `/api/v1/artifacts/${state.data.artifacts[0].id}/content`);
 });
 
 test("SSE forwards job lifecycle events", async (context) => {
@@ -256,6 +258,36 @@ test("HTTP exposes project context and derives workbench Lovart activation", asy
   assert.equal(JSON.stringify(generated).includes("accessKey"), false);
   const rejectedActivation = await fetch(`${server.url}/api/v1/generations`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: "bad", activation: { source: "codex_explicit" }, idempotency_key: "http-bad" }) });
   assert.equal(rejectedActivation.status, 400);
+});
+
+test("HTTP follow-up derives contextual activation and rejects client activation", async (context) => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-http-follow-up-"));
+  const calls = [];
+  const server = await startHttpServer({
+    dataDirectory,
+    service: createWorkbenchService({ dataDirectory }),
+    orchestrator: {
+      async followUp(input) { calls.push(input); return { job: { id: "follow-job", status: "queued_for_agent" }, idempotent: false }; },
+      async get(input) { return { job: { id: input.job_id }, artifacts: [] }; },
+    },
+    port: 0,
+  });
+  context.after(async () => { await server.close(); await rm(dataDirectory, { recursive: true, force: true }); });
+  const response = await fetch(`${server.url}/api/v1/jobs/parent-job/follow-ups`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ artifact_id: "artifact-1", instruction: "Make it dusk", idempotency_key: "follow-http" }),
+  });
+  assert.equal(response.status, 202);
+  assert.equal(calls[0].parent_job_id, "parent-job");
+  assert.equal(calls[0].activation.source, "codex_context_continuation");
+  assert.equal(calls[0].activation.artifact_id, "artifact-1");
+  const rejected = await fetch(`${server.url}/api/v1/jobs/parent-job/follow-ups`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ artifact_id: "artifact-1", instruction: "bad", activation: { source: "codex_explicit" }, idempotency_key: "follow-http-2" }),
+  });
+  assert.equal(rejected.status, 400);
 });
 
 test("HTTP reads a redacted job and delegates exact cost confirmation", async (context) => {

@@ -91,3 +91,38 @@ test("a stored thread resumes polling without a second submit", async (context) 
   assert.equal(calls.filter(([name]) => name === "resume").length, 1);
   assert.equal(calls.filter(([name]) => name === "generate").length, 0);
 });
+
+test("continues one imported artifact with immutable parent lineage and thread reuse", async (context) => {
+  const { calls, orchestrator, workbenchService } = await createHarness(context);
+  const parent = await orchestrator.submit({ prompt: "Original prompt byte-for-byte", activation: { source: "codex_explicit" }, idempotency_key: "follow-parent" });
+  const artifact = (await orchestrator.get({ job_id: parent.job.id })).artifacts[0];
+  const result = await orchestrator.followUp({
+    parent_job_id: parent.job.id,
+    artifact_id: artifact.id,
+    instruction: "Change the lighting to dusk",
+    activation: { source: "codex_context_continuation", parent_job_id: parent.job.id, artifact_id: artifact.id },
+    idempotency_key: "follow-1",
+  });
+  assert.equal(result.job.status, "succeeded");
+  const followGenerate = calls.find(([name, input]) => name === "generate" && input.prompt.includes("Change the lighting"));
+  assert.equal(followGenerate[1].thread_id, parent.job.lovart_thread_id);
+  assert.deepEqual(followGenerate[1].attachments, ["https://cdn.lovart.ai/fake.png"]);
+  const state = await workbenchService.getState({ include: ["jobs", "artifacts"] });
+  const followJob = state.jobs.find((job) => job.id === result.job.id);
+  assert.equal(followJob.follow_up.parent_job_id, parent.job.id);
+  assert.equal(followJob.follow_up.parent_artifact_id, artifact.id);
+  assert.equal(followJob.follow_up.instruction, "Change the lighting to dusk");
+  assert.equal(followJob.follow_up.project_id, parent.job.lovart_project_id);
+  assert.equal(followJob.snapshot.prompt.text, "Original prompt byte-for-byte");
+});
+
+test("follow-up rejects an artifact from a different parent job", async (context) => {
+  const { orchestrator } = await createHarness(context);
+  const first = await orchestrator.submit({ prompt: "First", activation: { source: "codex_explicit" }, idempotency_key: "cross-first" });
+  const second = await orchestrator.submit({ prompt: "Second", activation: { source: "codex_explicit" }, idempotency_key: "cross-second" });
+  const artifact = (await orchestrator.get({ job_id: first.job.id })).artifacts[0];
+  await assert.rejects(
+    () => orchestrator.followUp({ parent_job_id: second.job.id, artifact_id: artifact.id, instruction: "Cross job", activation: { source: "codex_context_continuation", parent_job_id: second.job.id, artifact_id: artifact.id }, idempotency_key: "cross-follow" }),
+    (error) => error.code === "NOT_FOUND",
+  );
+});

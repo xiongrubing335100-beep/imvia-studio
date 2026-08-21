@@ -71,6 +71,7 @@ test("activation-aware generation requires explicit Lovart context and exposes n
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-mcp-activation-"));
   const orchestrator = {
     async submit(input) { return { job: { id: "job-1", status: "succeeded", activation: input.activation }, result: { final_status: "done" } }; },
+    async followUp(input) { return { job: { id: "follow-1", status: "queued_for_agent", activation: input.activation }, result: { final_status: "queued" } }; },
     async get() { return { job: { id: "job-1", status: "succeeded" }, artifacts: [] }; },
     async confirm(input) { return { job: { id: input.job_id, status: "succeeded" }, result: { final_status: "done" } }; },
   };
@@ -92,4 +93,7 @@ test("activation-aware generation requires explicit Lovart context and exposes n
   assert.equal(JSON.stringify(tool.inputSchema).includes("access_key"), false);
   const result = await client.callTool({ name: "imvia_generate", arguments: { prompt: "use Lovart", activation: { source: "codex_explicit" }, idempotency_key: "job-1" } });
   assert.equal(result.structuredContent.data.job.activation.source, "codex_explicit");
+  const followUp = await client.callTool({ name: "imvia_follow_up_generation", arguments: { parent_job_id: "parent-1", artifact_id: "artifact-1", instruction: "make it dusk", activation: { source: "codex_context_continuation", parent_job_id: "parent-1", artifact_id: "artifact-1" }, idempotency_key: "follow-1" } });
+  assert.equal(followUp.structuredContent.data.job.activation.source, "codex_context_continuation");
+  assert.equal(JSON.stringify(followUp).includes("accessKey"), false);
 });

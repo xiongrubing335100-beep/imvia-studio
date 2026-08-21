@@ -3,7 +3,7 @@
 IMVIA Studio is an independent local MCP plugin. Version 0.3.0 keeps the
 Milestone 5 fixture-only orchestration, keeps the optional Milestone 6
 read-only Lovart capability probe, and adds a Milestone 7 no-terminal Lovart
-connection and creation path. The MCP Server ID remains
+connection, project context, creation, and result follow-up path. The MCP Server ID remains
 `imvia-studio`.
 
 The MCP launcher uses a portable proxy policy. By default (`IMVIA_PROXY_MODE=auto`)
@@ -84,7 +84,7 @@ identifiers are ignored.
 
 ## Tool inventory
 
-The MCP server exposes exactly 19 tools. The original 12 retain their schemas
+The MCP server exposes exactly 24 tools. The original 12 retain their schemas
 and fixture-only behavior:
 
 - `imvia_claim_cost_decision`
@@ -111,10 +111,29 @@ Milestone 7 adds the no-terminal user flow:
 - `imvia_lovart_status`
 - `imvia_generate`
 - `imvia_confirm_generation`
+- `imvia_list_lovart_projects`
+- `imvia_select_lovart_project`
+- `imvia_create_lovart_project`
+- `imvia_get_generation`
+- `imvia_follow_up_generation`
 
 The workbench entry point is:
 
 - `imvia_open_workbench`
+
+## Result workspace and text follow-up
+
+The right-side panel keeps its existing empty state until the local state has
+an imported artifact. Once an image, video, or audio artifact is available,
+the panel shows media-specific previews, job status, generation time, and a
+redacted link to the active Lovart project. Selecting a result exposes
+**继续编辑**. Its text instruction is submitted with the selected job and
+artifact lineage through `POST /api/v1/jobs/:jobId/follow-ups` or
+`imvia_follow_up_generation`; the parent project is reused, and an existing
+live parent thread is reused only when its lineage is recorded as IMVIA live.
+The browser receives only a managed local content URL—never local filesystem
+paths, credential fields, or raw Lovart responses. Cost confirmation remains
+explicit and a failed Lovart request never falls back to Codex ImageGen.
 
 ## No-terminal Lovart workflow
 

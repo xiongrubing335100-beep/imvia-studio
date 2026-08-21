@@ -244,6 +244,16 @@ export function createServer({
       description: "Read one redacted local Lovart generation job and its imported artifacts.",
       inputSchema: z.object({ job_id: z.string().min(1) }).strict(),
     }, lovartResponse((input) => orchestrator.get(input)));
+    server.registerTool("imvia_follow_up_generation", {
+      description: "Continue one imported Lovart artifact with an explicit text instruction. Reuses only the parent Lovart lineage and never falls back to another provider.",
+      inputSchema: z.object({
+        parent_job_id: z.string().min(1),
+        artifact_id: z.string().min(1),
+        instruction: z.string().min(1),
+        activation: activationSchema,
+        idempotency_key: z.string().min(1),
+      }).strict(),
+    }, lovartResponse((input) => orchestrator.followUp(input)));
     server.registerTool("imvia_confirm_generation", {
       description: "Confirm one pending Lovart job only after explicit current-session acceptance with the exact cost binding.",
       inputSchema: z.object({ job_id: z.string().min(1), attempt: z.number().int().positive(), cost_fingerprint: z.string().regex(/^[0-9a-f]{64}$/), decision_id: z.string().min(1) }).strict(),
@@ -389,6 +399,7 @@ export async function startServer() {
   const orchestrator = createGenerationOrchestrator({ projectContextService, workbenchService: service, generationService, artifactTransfer });
   const http = await startHttpServer({
     service,
+    dataDirectory: stateDirectory,
     projectContextService,
     orchestrator,
     port: configuredPort(),
