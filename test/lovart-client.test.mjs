@@ -89,3 +89,64 @@ test("invalid JSON maps to a redacted upstream schema error", async () => {
 
   await assert.rejects(client.queryMode(), (error) => error.code === "UPSTREAM_SCHEMA_UNRECOGNIZED");
 });
+
+test("createProject uses the official empty-project save contract", async () => {
+  let request;
+  const client = createLovartClient({
+    credentials: { accessKey: "ak_test", secretKey: "sk_test" },
+    fetchImpl: async (url, options) => {
+      request = { url, options };
+      return response(200, { code: 0, data: { project_id: "project-new", project_name: "新项目" } });
+    },
+  });
+
+  assert.deepEqual(await client.createProject({ project_name: "新项目" }), { project_id: "project-new", project_name: "新项目" });
+  assert.equal(request.url, `${LOVART_BASE_URL}/v1/openapi/project/save`);
+  assert.equal(request.options.method, "POST");
+  assert.deepEqual(JSON.parse(request.options.body), {
+    project_id: "",
+    canvas: "",
+    project_cover_list: [],
+    pic_count: 0,
+    project_type: 3,
+    project_name: "新项目",
+  });
+  assert.equal(Object.hasOwn(request.options.headers, "X-Secret-Key"), false);
+});
+
+test("validateProject sends the exact project id and rejects an invalid project", async () => {
+  let request;
+  const client = createLovartClient({
+    credentials: { accessKey: "ak_test", secretKey: "sk_test" },
+    fetchImpl: async (url, options) => {
+      request = { url, options };
+      return response(200, { code: 0, data: { valid: false, project_name: "" } });
+    },
+  });
+
+  await assert.rejects(client.validateProject({ project_id: "project-missing" }), (error) => error.code === "INVALID_LOVART_PROJECT");
+  assert.equal(request.url, `${LOVART_BASE_URL}/v1/openapi/project/validate?project_id=project-missing`);
+  assert.equal(request.options.method, "GET");
+  assert.equal(request.options.body, undefined);
+});
+
+test("upload sends a signed multipart request without putting keys in the body", async () => {
+  let request;
+  const client = createLovartClient({
+    credentials: { accessKey: "ak_test", secretKey: "sk_private" },
+    readFileImpl: async () => Buffer.from("file-bytes"),
+    fetchImpl: async (url, options) => {
+      request = { url, options };
+      return response(200, { code: 0, data: { url: "https://cdn.lovart.ai/file-1" } });
+    },
+  });
+
+  assert.deepEqual(await client.upload({ file_path: "/tmp/reference.png" }), { url: "https://cdn.lovart.ai/file-1" });
+  assert.equal(request.url, `${LOVART_BASE_URL}/v1/openapi/file/upload`);
+  assert.equal(request.options.method, "POST");
+  assert.match(request.options.headers["Content-Type"], /^multipart\/form-data; boundary=/);
+  const body = Buffer.from(request.options.body).toString("utf8");
+  assert.match(body, /filename="reference\.png"/);
+  assert.match(body, /file-bytes/);
+  assert.equal(body.includes("sk_private"), false);
+});

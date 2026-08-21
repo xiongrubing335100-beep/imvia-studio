@@ -77,5 +77,29 @@ export function createGenerationService({
     }
   }
 
-  return Object.freeze({ connect, generate, confirm });
+  async function createProject(input) {
+    try {
+      return await (await clientForOperation()).createProject(input);
+    } catch (error) {
+      throw stableError(error);
+    }
+  }
+
+  async function validateProject(input) {
+    try {
+      return await (await clientForOperation()).validateProject(input);
+    } catch (error) {
+      throw stableError(error);
+    }
+  }
+
+  async function upload(input) {
+    try {
+      return await (await clientForOperation()).upload(input);
+    } catch (error) {
+      throw stableError(error);
+    }
+  }
+
+  return Object.freeze({ connect, generate, confirm, createProject, validateProject, upload });
 }
