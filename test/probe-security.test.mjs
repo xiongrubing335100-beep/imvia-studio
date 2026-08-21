@@ -27,7 +27,7 @@ const reviewedProductionHashes = Object.freeze({
   "src/probe/summary-validator.js": "728d94ed8bdd12b880fa73c59983e98f8076c17262b59c6b02f111b434edc982",
   "src/probe/transport.js": "eb14acf43af1d0a6d86936cb79b5f4acab5f908914eafc2dfaaff843a1ca2f34",
 });
-const reviewedNormalizedIndexHash = "8853818dea79ce0c6144a786180e998aa0596427fb1435df05bffe3f8d2cb49a";
+const reviewedNormalizedIndexHash = "631f287f5b01ea479d6b7b3e9b387105d94c8ac076017aef03a787ec062b500e";
 
 const reviewedImports = Object.freeze({
   "scripts/configure-lovart-readonly.swift": ["AppKit", "Darwin", "Security"],
@@ -36,6 +36,7 @@ const reviewedImports = Object.freeze({
   "src/domain/model-capabilities.js": [],
   "src/index.js": [
     "./domain/timestamps.js", "./domain/workbench-service.js", "./http/server.js",
+    "./lovart/credentials.js", "./lovart/generation-service.js",
     "./probe/authorization-service.js", "./probe/child-runner.js", "./probe/probe-service.js",
     "./probe/probe-store.js", "@modelcontextprotocol/sdk/server/mcp.js",
     "@modelcontextprotocol/sdk/server/stdio.js", "node:path", "node:url", "zod",
