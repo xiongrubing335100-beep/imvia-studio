@@ -4,6 +4,7 @@ import path from "node:path";
 import { JsonStore } from "../persistence/json-store.js";
 import { createCostFingerprint } from "./cost-confirmation.js";
 import { DomainError } from "./errors.js";
+import { normalizeLovartProjectLocator } from "./lovart-project-context.js";
 import { MODEL_CAPABILITIES } from "./model-capabilities.js";
 import { assertM5Source, isAllowedM5Source } from "./source-policy.js";
 import { assertExpiryAtOrAfterChecked, assertSourceCheckedAt } from "./timestamps.js";
@@ -59,7 +60,7 @@ function createInitialState() {
   const projectId = randomUUID();
   const draftId = randomUUID();
   return {
-    schema_version: "1",
+    schema_version: "2",
     created_at: now,
     updated_at: now,
     current_project_id: projectId,
@@ -93,12 +94,51 @@ function createInitialState() {
       updated_at: now,
     }],
     references: [],
+    lovart_projects: [],
+    active_lovart_project_id: null,
     jobs: [],
     artifacts: [],
     idempotency: {},
     audit_events: [],
     account_status: createDefaultAccountStatus(),
   };
+}
+
+function migrateWorkbenchState(state) {
+  if (state?.schema_version === "2") {
+    const migrated = clone(state);
+    migrated.lovart_projects ??= [];
+    migrated.active_lovart_project_id ??= null;
+    return { state: migrated, changed: !Array.isArray(state.lovart_projects) || !Object.hasOwn(state, "active_lovart_project_id") };
+  }
+  if (state?.schema_version !== "1") {
+    throw new DomainError("STATE_MIGRATION_FAILED", "The local workbench state schema is unsupported.", { schema_version: state?.schema_version ?? null });
+  }
+  const migrated = clone(state);
+  const projects = [];
+  for (const localProject of migrated.projects ?? []) {
+    if (typeof localProject?.lovart_project_id !== "string" || !localProject.lovart_project_id.trim()) continue;
+    const normalized = normalizeLovartProjectLocator(localProject.lovart_project_id);
+    if (!projects.some((project) => project.project_id === normalized.project_id)) {
+      projects.push({
+        project_id: normalized.project_id,
+        name: typeof localProject.name === "string" && localProject.name.trim() ? localProject.name.trim() : null,
+        canvas_url: normalized.canvas_url,
+        source: "legacy_migration",
+        created_at: localProject.created_at ?? isoNow(),
+        last_used_at: localProject.updated_at ?? localProject.created_at ?? isoNow(),
+      });
+    }
+  }
+  const currentLocalProject = migrated.projects?.find((project) => project.id === migrated.current_project_id);
+  const active = typeof currentLocalProject?.lovart_project_id === "string" && currentLocalProject.lovart_project_id.trim()
+    ? normalizeLovartProjectLocator(currentLocalProject.lovart_project_id).project_id
+    : projects[0]?.project_id ?? null;
+  migrated.schema_version = "2";
+  migrated.lovart_projects = projects;
+  migrated.active_lovart_project_id = active;
+  migrated.updated_at = isoNow();
+  return { state: migrated, changed: true };
 }
 
 function currentProject(state) {
@@ -268,6 +308,8 @@ function summarize(state, { include = [] } = {}) {
   const draft = findDraft(state, project.active_draft_id);
   const response = {
     schema_version: state.schema_version,
+    active_lovart_project_id: state.active_lovart_project_id ?? null,
+    lovart_projects: clone(state.lovart_projects ?? []),
     project: clone(project),
     projects: clone(state.projects),
     draft: clone(draft),
@@ -280,12 +322,85 @@ function summarize(state, { include = [] } = {}) {
 
 export function createWorkbenchService({ dataDirectory }) {
   if (!dataDirectory) throw new Error("dataDirectory is required.");
-  const store = new JsonStore({ dataDirectory, createInitialState });
+  const store = new JsonStore({ dataDirectory, createInitialState, migrateState: migrateWorkbenchState });
   const listeners = new Set();
 
   return {
     async getState(options) {
       return summarize(await store.read(), options);
+    },
+
+    async getLovartProjects() {
+      const state = await store.read();
+      return {
+        active_lovart_project_id: state.active_lovart_project_id ?? null,
+        projects: clone(state.lovart_projects ?? []),
+      };
+    },
+
+    async recordLovartProject({ project_id, name = null, canvas_url = null, source = "imvia:project_context" }) {
+      const normalized = normalizeLovartProjectLocator(project_id);
+      if (canvas_url != null && canvas_url !== normalized.canvas_url) {
+        throw new DomainError("INVALID_LOVART_PROJECT_LOCATOR", "canvas_url must match the official Lovart project canvas.", { project_id });
+      }
+      if (typeof source !== "string" || !source.trim()) throw new DomainError("VALIDATION_FAILED", "source is required.", { field: "source" });
+      return store.update((state) => {
+        const now = isoNow();
+        let project = state.lovart_projects.find((item) => item.project_id === normalized.project_id);
+        if (!project) {
+          project = {
+            project_id: normalized.project_id,
+            name: typeof name === "string" && name.trim() ? name.trim() : null,
+            canvas_url: normalized.canvas_url,
+            source: source.trim(),
+            created_at: now,
+            last_used_at: null,
+          };
+          state.lovart_projects.push(project);
+        } else {
+          if (typeof name === "string" && name.trim()) project.name = name.trim();
+          project.canvas_url = normalized.canvas_url;
+          project.source = source.trim();
+        }
+        state.updated_at = now;
+        state.audit_events.push({ id: randomUUID(), occurred_at: now, actor: source.trim(), reason: "Lovart project recorded", changed_fields: ["lovart_projects"] });
+        return { project: clone(project), projects: clone(state.lovart_projects) };
+      });
+    },
+
+    async setLovartProject({ project_id, name = null, canvas_url = null, source = "imvia:project_context" }) {
+      const normalized = normalizeLovartProjectLocator(project_id);
+      if (canvas_url != null && canvas_url !== normalized.canvas_url) {
+        throw new DomainError("INVALID_LOVART_PROJECT_LOCATOR", "canvas_url must match the official Lovart project canvas.", { project_id });
+      }
+      if (typeof source !== "string" || !source.trim()) throw new DomainError("VALIDATION_FAILED", "source is required.", { field: "source" });
+      return store.update((state) => {
+        const now = isoNow();
+        let project = state.lovart_projects.find((item) => item.project_id === normalized.project_id);
+        if (!project) {
+          project = {
+            project_id: normalized.project_id,
+            name: typeof name === "string" && name.trim() ? name.trim() : null,
+            canvas_url: normalized.canvas_url,
+            source: source.trim(),
+            created_at: now,
+            last_used_at: now,
+          };
+          state.lovart_projects.push(project);
+        } else {
+          if (typeof name === "string" && name.trim()) project.name = name.trim();
+          project.canvas_url = normalized.canvas_url;
+          project.source = source.trim();
+          project.last_used_at = now;
+        }
+        state.active_lovart_project_id = normalized.project_id;
+        const localProject = currentProject(state);
+        localProject.lovart_project_id = normalized.project_id;
+        localProject.updated_at = now;
+        state.updated_at = now;
+        state.audit_events.push({ id: randomUUID(), occurred_at: now, actor: source.trim(), reason: "Lovart project selected", changed_fields: ["active_lovart_project_id", "lovart_projects", "projects.lovart_project_id"] });
+        return { active_project: clone(project), projects: clone(state.lovart_projects) };
+      });
     },
 
     async getAccountStatus({ max_age_seconds = 300 } = {}) {
