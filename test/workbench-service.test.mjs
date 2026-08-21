@@ -219,6 +219,31 @@ test("creates an immutable task snapshot and returns it for an idempotent retry"
   assert.equal(state.jobs.length, 1);
 });
 
+test("stores a workbench button submission as an immutable Codex handoff without executing it", async (context) => {
+  const { service } = await createTestService(context);
+  await service.setLovartProject({ project_id: "project-from-form", source: "user_selected" });
+  const snapshot = {
+    mode: "image",
+    model: "Seedream 4.0",
+    prompt: { text: "  Use the two references.\n", tokens: [] },
+    attachments: ["imvia-workbench:/assets/person-reference.png"],
+    settings: { ratio: "3:4", resolution: "2K", count: 1 },
+  };
+
+  const submitted = await service.createWorkbenchSubmission({ snapshot, idempotency_key: "browser-submit-1" });
+  assert.equal(submitted.job.status, "queued_for_agent");
+  assert.equal(submitted.job.direct_generation, false);
+  assert.equal(submitted.job.activation.source, "workbench_action");
+  assert.equal(submitted.job.lovart_project_id, "project-from-form");
+  assert.equal(submitted.job.snapshot.lovart_project_id, "project-from-form");
+
+  snapshot.prompt.text = "mutated after submit";
+  await service.setLovartProject({ project_id: "project-changed-later", source: "user_selected" });
+  const [stored] = await service.listPendingJobs();
+  assert.equal(stored.snapshot.prompt.text, "  Use the two references.\n");
+  assert.equal(stored.lovart_project_id, "project-from-form");
+});
+
 test("rejects an unsupported patch path without changing the draft", async (context) => {
   const { service } = await createTestService(context);
   const initial = await service.getState();

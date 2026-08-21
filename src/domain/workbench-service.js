@@ -595,6 +595,89 @@ export function createWorkbenchService({ dataDirectory }) {
       });
     },
 
+    async createWorkbenchSubmission({ snapshot, idempotency_key }) {
+      if (!idempotency_key || typeof idempotency_key !== "string") throw new DomainError("VALIDATION_FAILED", "idempotency_key is required.", { field: "idempotency_key" });
+      if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) throw new DomainError("VALIDATION_FAILED", "snapshot must be an object.", { field: "snapshot" });
+      if (!snapshot.prompt || typeof snapshot.prompt !== "object" || typeof snapshot.prompt.text !== "string" || !snapshot.prompt.text.trim()) {
+        throw new DomainError("VALIDATION_FAILED", "A non-empty prompt is required before sending a task to Codex.", { field: "snapshot.prompt.text" });
+      }
+      if (!["image", "video"].includes(snapshot.mode)) throw new DomainError("VALIDATION_FAILED", "Workbench mode must be image or video.", { field: "snapshot.mode" });
+      if (snapshot.attachments != null && (!Array.isArray(snapshot.attachments) || snapshot.attachments.some((item) => typeof item !== "string" || !item))) {
+        throw new DomainError("VALIDATION_FAILED", "snapshot.attachments must contain only non-empty strings.", { field: "snapshot.attachments" });
+      }
+      const activation = { source: "workbench_action" };
+      return store.update((state) => {
+        const project = currentProject(state);
+        const selectedProjectId = project.lovart_project_id ?? state.active_lovart_project_id ?? null;
+        const frozenSnapshot = {
+          ...clone(snapshot),
+          prompt: clone(snapshot.prompt),
+          attachments: clone(snapshot.attachments ?? []),
+          lovart_project_id: selectedProjectId,
+          activation: clone(activation),
+        };
+        const comparableSnapshot = stableJson(frozenSnapshot);
+        const existing = state.idempotency[idempotency_key];
+        if (existing) {
+          if (existing.operation !== "workbench_submission" || existing.snapshot !== comparableSnapshot) {
+            throw new DomainError("IDEMPOTENCY_CONFLICT", "This idempotency key belongs to a different workbench submission.");
+          }
+          return { job: clone(findJob(state, existing.job_id)), idempotent: true };
+        }
+        const now = isoNow();
+        const job = {
+          id: randomUUID(),
+          project_id: project.id,
+          draft_id: null,
+          draft_revision: null,
+          snapshot: frozenSnapshot,
+          submission_kind: "workbench_generation",
+          status: "queued_for_agent",
+          attempt: 1,
+          idempotency_key,
+          direct_generation: false,
+          lovart_project_id: selectedProjectId,
+          activation: clone(activation),
+          lovart_thread_id: null,
+          lovart_thread_source: null,
+          parent_job_id: null,
+          iteration_index: 0,
+          estimated_cost: null,
+          cost_decisions: [],
+          error: null,
+          created_at: now,
+          updated_at: now,
+        };
+        state.jobs.push(job);
+        state.idempotency[idempotency_key] = { operation: "workbench_submission", job_id: job.id, snapshot: comparableSnapshot };
+        state.updated_at = now;
+        state.audit_events.push({ id: randomUUID(), occurred_at: now, actor: "workbench_action", reason: "Workbench task sent to Codex", changed_fields: ["jobs", "idempotency"] });
+        return { job: clone(job), idempotent: false };
+      });
+    },
+
+    async activateWorkbenchSubmission({ job_id, lovart_project_id }) {
+      const normalized = normalizeLovartProjectLocator(lovart_project_id);
+      return store.update((state) => {
+        const job = findJob(state, job_id);
+        if (job.submission_kind !== "workbench_generation" || job.activation?.source !== "workbench_action") {
+          throw new DomainError("VALIDATION_FAILED", "The requested job is not a workbench submission.", { job_id });
+        }
+        if (job.direct_generation) {
+          if (job.lovart_project_id !== normalized.project_id) throw statusConflict(job, "The workbench submission is already bound to a different Lovart project.", { lovart_project_id: job.lovart_project_id });
+          return { job: clone(job), idempotent: true };
+        }
+        if (job.status !== "queued_for_agent") throw statusConflict(job, "The workbench submission is no longer waiting for Codex.");
+        const now = isoNow();
+        job.direct_generation = true;
+        job.lovart_project_id = normalized.project_id;
+        job.updated_at = now;
+        state.updated_at = now;
+        state.audit_events.push({ id: randomUUID(), occurred_at: now, actor: "imvia:workbench_handoff", reason: "Codex accepted workbench task for Lovart execution", changed_fields: ["direct_generation", "lovart_project_id"] });
+        return { job: clone(job), idempotent: false };
+      });
+    },
+
     async createFollowUpGenerationJob({ parent_job_id, artifact_id, instruction, activation_source, idempotency_key }) {
       if (typeof parent_job_id !== "string" || !parent_job_id.trim()) throw new DomainError("VALIDATION_FAILED", "parent_job_id is required.", { field: "parent_job_id" });
       if (typeof artifact_id !== "string" || !artifact_id.trim()) throw new DomainError("VALIDATION_FAILED", "artifact_id is required.", { field: "artifact_id" });

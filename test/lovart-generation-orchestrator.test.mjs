@@ -66,6 +66,28 @@ test("uploads only managed workbench assets for direct generation", async (conte
   assert.deepEqual(generated[1].attachments, ["https://cdn.lovart.ai/sample.png"]);
 });
 
+test("Codex executes the exact queued workbench submission instead of creating a second job", async (context) => {
+  const { calls, workbenchService, orchestrator } = await createHarness(context);
+  await workbenchService.setLovartProject({ project_id: "project-workbench", source: "user_selected" });
+  const queued = await workbenchService.createWorkbenchSubmission({
+    snapshot: {
+      mode: "image",
+      model: "Seedream 4.0",
+      prompt: { text: "  Workbench prompt byte-for-byte\n", tokens: [] },
+      attachments: ["imvia-workbench:/assets/person-reference.png"],
+      settings: { ratio: "3:4", resolution: "2K", count: 1 },
+    },
+    idempotency_key: "workbench-handoff-1",
+  });
+
+  const output = await orchestrator.executePrepared({ job_id: queued.job.id });
+  assert.equal(output.job.id, queued.job.id);
+  assert.equal(output.job.status, "succeeded");
+  assert.equal(calls.find(([name]) => name === "generate")[1].prompt, "  Workbench prompt byte-for-byte\n");
+  assert.equal(calls.find(([name]) => name === "generate")[1].project_id, "project-workbench");
+  assert.equal((await workbenchService.getState({ include: ["jobs"] })).jobs.length, 1);
+});
+
 test("explicit project is validated without changing the active project", async (context) => {
   const { calls, projectContextService, workbenchService, orchestrator } = await createHarness(context);
   await projectContextService.select({ locator: "active-project", source: "user_selected" });

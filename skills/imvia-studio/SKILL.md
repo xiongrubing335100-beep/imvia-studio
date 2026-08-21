@@ -16,6 +16,24 @@ panel. Do not ask the user to start a terminal, paste a URL, or run a local
 server command. The page uses the same local IMVIA state and HTTP/SSE service
 as the MCP tools. The original Lovart plugin remains independent.
 
+Keep the current task active after opening the panel. Read the returned
+`submission_cursor`, then call `imvia_wait_for_workbench_submission` with that
+cursor. A timeout means the user has not clicked the workbench submit button
+yet; it is not a failure and must not call Lovart. Continue waiting while the
+current workbench task is active. When the tool returns `submitted: true`,
+read and summarize its immutable `snapshot` as the user's message to Codex,
+then call `imvia_execute_workbench_submission` with that exact `job_id`.
+Never create a second job with `imvia_generate` for the same workbench
+submission.
+
+The workbench button only hands the summarized form to Codex. It never calls
+Lovart directly. Saving a project address only normalizes and remembers it
+locally; project validation, automatic project creation, uploads, and all
+Lovart side effects begin only when Codex executes the received submission.
+The button click is the explicit task-scoped Lovart activation. If execution
+returns a pending cost, stop and ask for the required current-session decision
+under the cost-confirmation rules below.
+
 ## Milestone 5 fixture-only gate
 
 Never call an installed or real Lovart MCP tool in Milestone 5. Use only a test-provided adapter explicitly labelled `fixture` or `mock_lovart`. If no such adapter is present, stop and report that Milestone 5 cannot execute. Never inspect, configure, reconnect, or fall back to Lovart, and never read credentials.
@@ -51,8 +69,10 @@ contexts. A request may use Lovart only when the user explicitly addresses the
 plugin with `@`, names Lovart or IMVIA Studio, asks to use the Lovart plugin, or
 continues a clearly related active Lovart task with a parent job or artifact.
 Clicking a workbench action such as **发送生成** or **继续编辑** is also an
-explicit Lovart selection. The activation is task-scoped and must be recorded
-in the `activation` object passed to `imvia_generate`.
+explicit Lovart selection. The workbench first sends an immutable summary to
+Codex; Codex then executes that exact job with
+`imvia_execute_workbench_submission`. The activation remains task-scoped and
+is stored as `workbench_action` on that submission.
 
 If the user only asks for a generic image or video, use Codex's native ImageGen
 or video capability. A saved key, a connected status, an active Lovart project,

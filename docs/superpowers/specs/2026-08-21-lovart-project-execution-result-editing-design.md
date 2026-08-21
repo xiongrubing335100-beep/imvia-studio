@@ -8,7 +8,7 @@ Approved in chat on 2026-08-21. This document is the product and technical desig
 
 Turn the independent IMVIA Studio plugin into a complete Lovart creation surface with two equivalent entry points:
 
-- a non-technical user can create and edit through the workbench without returning to a Codex chat to advance each step; and
+- a non-technical user can create and edit through the workbench, with each submit action handed to the active Codex task for processing; and
 - a user can explicitly invoke IMVIA Studio or Lovart in a Codex conversation and use the same project, job, result, and revision history.
 
 The design adds persistent Lovart project context, a shared execution service, result-side follow-up editing, and image annotation editing. It also preserves a strict provider boundary: Codex must not invoke Lovart for an ordinary image or video request unless the user explicitly activated the plugin or is clearly continuing an active Lovart task.
@@ -17,7 +17,7 @@ The design adds persistent Lovart project context, a shared execution service, r
 
 1. IMVIA, rather than the existing Lovart plugin, owns the shared project and job state.
 2. The workbench and Codex MCP tools call the same IMVIA orchestration service.
-3. The workbench does not inject a message into the Codex chat UI. A workbench action is itself an explicit user action and may start IMVIA execution directly.
+3. The workbench does not call Lovart directly. A workbench action creates an immutable local handoff, and the active Codex task receives and executes that exact job through MCP.
 4. A missing Lovart project is created once on the first generation and then reused until the user explicitly changes it.
 5. A submitted job snapshots its Lovart project ID. Later project changes cannot reroute that job.
 6. A result edit always creates a new revision. It never overwrites the source artifact.
@@ -30,9 +30,9 @@ The design adds persistent Lovart project context, a shared execution service, r
 
 This would reuse project management quickly, but it would split state between two plugins, couple IMVIA to another local plugin, and violate the existing zero-modification and zero-reconnection boundary. It is rejected.
 
-### Send a synthetic message from the workbench into Codex
+### Send a synthetic UI message from the workbench into Codex
 
-This would make Codex appear to be the transport, but it depends on host UI APIs that are not part of the current plugin contract and would fail when no Codex turn is active. It is rejected.
+Directly scripting the Codex chat UI depends on host browser APIs that are not part of the plugin contract and would fail when no Codex turn is active. It remains rejected. The supported equivalent is a durable local submission plus an MCP wait/receive tool owned by the active Codex task.
 
 ### Shared IMVIA execution service
 
@@ -52,13 +52,14 @@ Both entry points call one durable service. This keeps state, cost confirmation,
 ## Architecture
 
 ```text
-Workbench action ----\
-                      >-- IMVIA GenerationOrchestrator -- LovartGateway -- Lovart
-Codex MCP tool ------/                  |
-                                        +-- ProjectContextService
-                                        +-- durable JobStore
-                                        +-- result and revision history
-                                        +-- redacted real-time events
+Workbench action -- durable handoff --> Codex MCP receiver
+                                      |
+Codex MCP tool ------------------------+-- IMVIA GenerationOrchestrator -- LovartGateway -- Lovart
+                                                            |
+                                                            +-- ProjectContextService
+                                                            +-- durable JobStore
+                                                            +-- result and revision history
+                                                            +-- redacted real-time events
 ```
 
 ### ProjectContextService
@@ -252,7 +253,7 @@ When no project is selected, it states that the first generation will create one
 
 The primary action becomes “Send to IMVIA to generate”. Its status text may show project creation, upload, submission, generation, cost confirmation, or result import. A stable idempotency key prevents double-click duplication.
 
-The action does not require the user to return to Codex. A result created from Codex appears in the same workbench state and history.
+The action is delivered to the already-active Codex task; the user does not have to copy the form, paste a prompt, or type a manual “continue” message. A result created from Codex appears in the same workbench state and history.
 
 ### Empty and populated result states
 
@@ -380,7 +381,7 @@ No migration reads or writes the existing Lovart plugin state.
 1. With no project selected, the first real generation creates exactly one Lovart project and saves it as active.
 2. Later workbench and explicit Codex Lovart requests reuse that project until the user changes it.
 3. An explicit project change affects future jobs only.
-4. A workbench click can complete a Lovart job without a manual “continue” message in Codex.
+4. A workbench click hands the exact form summary to the active Codex task and can complete a Lovart job without a manual “continue” message.
 5. Generic Codex image requests cause zero Lovart calls.
 6. Explicit or valid contextual Lovart requests cause zero ImageGen calls.
 7. The empty result page remains in its current visual state until the first artifact exists.

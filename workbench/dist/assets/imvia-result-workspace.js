@@ -1,4 +1,4 @@
-import { resolveVisualCaret } from "./imvia-prompt-layout.js?v=1";
+import { resolveVisualCaret, visualCaretPhase } from "./imvia-prompt-layout.js?v=2";
 
 (() => {
   "use strict";
@@ -37,7 +37,8 @@ import { resolveVisualCaret } from "./imvia-prompt-layout.js?v=1";
     #imvia-workbench-toast.error{color:#f0b2b2;border-color:#71454a}
     .prompt-box textarea{caret-color:transparent!important}
     #imvia-prompt-visual-caret{position:fixed;z-index:230;width:1.5px;pointer-events:none;background:#ecffff;opacity:0;transform:translateX(-.5px);box-shadow:0 0 3px #57d6d8}
-    #imvia-prompt-visual-caret.active{opacity:1;animation:imvia-caret-blink 1.05s steps(1,end) infinite}
+    #imvia-prompt-visual-caret.active{opacity:1}
+    #imvia-prompt-visual-caret.active.blinking{animation:imvia-caret-blink 1.05s steps(1,end) infinite}
     @keyframes imvia-caret-blink{0%,48%{opacity:1}49%,100%{opacity:0}}
   `;
   const style = document.createElement("style"); style.textContent = css; document.head.appendChild(style);
@@ -51,8 +52,10 @@ import { resolveVisualCaret } from "./imvia-prompt-layout.js?v=1";
   let activeProject = null;
   let projectsLoaded = false;
   let projectLoading = false;
-  let generationPending = false;
+  let handoffPending = false;
   let promptCaretFrame = 0;
+  let promptCaretTimer = 0;
+  let lastPromptCaretInteractionAt = null;
 
   const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[character]));
   const panel = () => document.querySelector(".live-result-panel");
@@ -144,22 +147,23 @@ import { resolveVisualCaret } from "./imvia-prompt-layout.js?v=1";
       showWorkbenchToast("已设置为自动选择项目");
       return;
     }
-    projectLoading = true; button.disabled = true; projectContextStatus("正在验证 Lovart 项目地址…");
+    projectLoading = true; button.disabled = true; projectContextStatus("正在保存项目地址…");
     try {
-      activeProject = await apiJson("/api/v1/lovart/projects/select", { method: "POST", body: JSON.stringify({ locator, source: "user_selected" }) });
+      activeProject = await apiJson("/api/v1/lovart/projects/remember", { method: "POST", body: JSON.stringify({ locator, source: "user_selected" }) });
       projectLocator = activeProject?.canvas_url || locator;
       projectsLoaded = true;
       updateProjectContext();
-      showWorkbenchToast("Lovart 项目已选定，后续生成会沿用它");
+      projectContextStatus("项目地址已保存；Codex 执行任务时再验证并使用它。");
+      showWorkbenchToast("项目地址已保存，将随任务发送给 Codex");
     } catch (error) {
-      projectContextStatus(error.message || "项目地址无效", true);
-      showWorkbenchToast(error.message || "项目地址无效，请检查后重试", true);
+      projectContextStatus(error.message || "项目地址保存失败", true);
+      showWorkbenchToast(error.message || "项目地址保存失败，请稍后重试", true);
     } finally {
       projectLoading = false; button.disabled = false;
     }
   }
 
-  async function ensureProjectSelected() {
+  async function ensureProjectRemembered() {
     const input = document.querySelector("#imvia-project-context input");
     const locator = input?.value?.trim() || "";
     if (!locator || locator === projectLocator) return;
@@ -167,53 +171,97 @@ import { resolveVisualCaret } from "./imvia-prompt-layout.js?v=1";
     if (!projectLocator) throw new Error("项目地址未保存");
   }
 
-  function readGenerationInput() {
-    const prompt = document.querySelector(".prompt-box textarea")?.value?.trim() || "";
+  function compactText(element) {
+    return element?.textContent?.replace(/\s+/gu, " ").trim() || "";
+  }
+
+  async function referenceSummary() {
+    const summaries = [];
+    const counters = { image: 0, video: 0, audio: 0 };
+    const kindLabels = { image: "图片", video: "视频", audio: "音频" };
+    for (const [index, item] of Array.from(document.querySelectorAll(".references-section .reference-item")).entries()) {
+      const media = item.querySelector("img,video,audio");
+      const source = media?.getAttribute("src") || media?.getAttribute("poster") || "";
+      const kind = item.querySelector(".audio-reference") || media?.tagName?.toLowerCase() === "audio" ? "audio" : item.querySelector("em") || media?.tagName?.toLowerCase() === "video" ? "video" : "image";
+      counters[kind] += 1;
+      const label = compactText(item.querySelector(".reference-label span")) || compactText(item.querySelector("strong")) || `${kindLabels[kind]}${counters[kind]}`;
+      let attachment = null;
+      if (source.startsWith("blob:") || source.startsWith("data:")) {
+        const mediaResponse = await fetch(source);
+        const bytes = await mediaResponse.arrayBuffer();
+        const uploaded = await apiJson("/api/v1/workbench/assets", { method: "POST", headers: { "content-type": mediaResponse.headers.get("content-type") || (kind === "video" ? "video/mp4" : kind === "audio" ? "audio/mpeg" : "image/png") }, body: bytes });
+        attachment = uploaded.attachment;
+      } else if (source) {
+        let url;
+        try { url = new URL(source, window.location.origin); } catch { url = null; }
+        if (url?.origin === window.location.origin && url.pathname.startsWith("/assets/")) attachment = `imvia-workbench:${url.pathname}`;
+        else if (url?.protocol === "https:") attachment = String(url);
+      }
+      summaries.push({ id: `workbench-reference-${index + 1}`, display: label.replace(/^@/u, ""), kind, attachment });
+    }
+    return summaries;
+  }
+
+  async function readWorkbenchSubmission() {
+    const prompt = document.querySelector(".prompt-box textarea")?.value || "";
     const tabText = document.querySelector(".creation-tabs button.active")?.textContent || "";
     const mode = tabText.includes("视频") ? "video" : "image";
     const model = document.querySelector(".model-section .select-box")?.textContent?.replace(/\s+/gu, " ").trim() || "";
-    const attachments = [];
-    for (const media of document.querySelectorAll(".references-section .reference-thumb img,.references-section .reference-thumb video,.references-section .reference-thumb audio")) {
-      const source = media.getAttribute("src") || media.getAttribute("poster") || "";
-      if (!source) continue;
-      if (source.startsWith("blob:")) throw new Error("本地上传素材需先保存到素材库后才能发送给 Lovart");
-      let pathname;
-      try { pathname = new URL(source, window.location.origin).pathname; } catch { continue; }
-      if (pathname.startsWith("/assets/")) attachments.push(`imvia-workbench:${pathname}`);
+    const references = await referenceSummary();
+    const settingValues = {};
+    for (const label of document.querySelectorAll(".settings-grid label,.advanced-panel label")) {
+      const name = compactText(label.querySelector(":scope > span"));
+      if (name) settingValues[name] = compactText(label.querySelector(".select-box"));
     }
-    return { prompt, mode, model, attachments };
+    const generationMode = compactText(document.querySelector(".mode-row .select-box"));
+    const countText = settingValues["生成数量"] || settingValues["数量"] || "1";
+    const durationText = settingValues["时长"] || "";
+    const tokens = references.filter((reference) => prompt.includes(`@${reference.display}`)).map((reference) => ({ reference_id: reference.id, display: reference.display }));
+    return {
+      mode,
+      model,
+      prompt: { text: prompt, tokens },
+      references,
+      attachments: references.map((reference) => reference.attachment).filter(Boolean),
+      settings: {
+        generation_mode: generationMode || null,
+        ratio: settingValues["比例"] || null,
+        resolution: settingValues["分辨率"] || null,
+        duration_seconds: durationText ? Number.parseInt(durationText, 10) || null : null,
+        count: Number.parseInt(countText, 10) || 1,
+        audio: document.querySelector(".audio-setting .toggle")?.classList.contains("on") || false,
+        advanced: Object.fromEntries(Object.entries(settingValues).filter(([name]) => !["比例", "分辨率", "时长", "生成数量", "数量"].includes(name))),
+      },
+      project_locator: document.querySelector("#imvia-project-context input")?.value?.trim() || null,
+    };
   }
 
-  async function submitLiveGeneration(button) {
-    if (generationPending) return;
-    const input = readGenerationInput();
-    if (!input.prompt) { showWorkbenchToast("请先填写创意描述", true); return; }
-    generationPending = true; button.disabled = true; const originalText = button.textContent; button.textContent = "正在提交 Lovart 任务…";
+  async function submitWorkbenchHandoff(button) {
+    if (handoffPending) return;
+    const prompt = document.querySelector(".prompt-box textarea")?.value || "";
+    if (!prompt.trim()) { showWorkbenchToast("请先填写创意描述", true); return; }
+    handoffPending = true; button.disabled = true; const originalText = button.textContent; button.textContent = "正在发送给 Codex…";
     try {
-      await ensureProjectSelected();
-      const prefer_models = input.model ? { [input.mode]: [input.model] } : undefined;
-      const payload = { prompt: input.prompt, mode: input.mode, attachments: input.attachments, idempotency_key: randomKey("workbench-generation"), ...(prefer_models ? { prefer_models } : {}) };
-      const result = await apiJson("/api/v1/generations", { method: "POST", body: JSON.stringify(payload) });
-      if (result.status === "awaiting_cost_confirmation") showWorkbenchToast("任务等待费用确认，请在当前 Codex 会话中明确确认");
-      else showWorkbenchToast("Lovart 任务已提交，结果会自动显示在右侧");
+      await ensureProjectRemembered();
+      const snapshot = await readWorkbenchSubmission();
+      await apiJson("/api/v1/workbench/submissions", { method: "POST", body: JSON.stringify({ snapshot, idempotency_key: randomKey("workbench-handoff") }) });
+      showWorkbenchToast("任务摘要已发送给 Codex，等待 Codex 处理");
       await load();
-      projectsLoaded = false;
-      await loadProjectContext();
     } catch (error) {
-      showWorkbenchToast(error.message || "Lovart 任务提交失败", true);
+      showWorkbenchToast(error.message || "任务发送给 Codex 失败", true);
     } finally {
-      generationPending = false; button.disabled = false; button.textContent = originalText;
+      handoffPending = false; button.disabled = false; button.textContent = originalText;
     }
   }
 
-  function installLiveGenerationAction() {
-    if (!isLiveWorkbench() || document.documentElement.dataset.imviaGenerationActionInstalled) return;
-    document.documentElement.dataset.imviaGenerationActionInstalled = "true";
+  function installWorkbenchHandoffAction() {
+    if (!isLiveWorkbench() || document.documentElement.dataset.imviaWorkbenchHandoffInstalled) return;
+    document.documentElement.dataset.imviaWorkbenchHandoffInstalled = "true";
     document.addEventListener("click", (event) => {
       const button = event.target?.closest?.(".primary-action");
       if (!button || !document.querySelector(".creator-panel")) return;
       event.preventDefault(); event.stopImmediatePropagation();
-      submitLiveGeneration(button).catch(() => {});
+      submitWorkbenchHandoff(button).catch(() => {});
     }, true);
   }
 
@@ -283,19 +331,24 @@ import { resolveVisualCaret } from "./imvia-prompt-layout.js?v=1";
     const textarea = document.querySelector(".prompt-box textarea");
     const highlight = document.querySelector(".prompt-highlights");
     if (!textarea || !highlight || document.activeElement !== textarea || textarea.selectionStart !== textarea.selectionEnd) {
-      caret.classList.remove("active");
+      caret.classList.remove("active", "engaged", "blinking");
       return;
     }
     const point = resolveVisualCaret({ segments: visualCaretSegments(highlight), selection_start: textarea.selectionStart });
     if (!point || point.top < 0 || point.top > window.innerHeight || point.left < 0 || point.left > window.innerWidth) {
-      caret.classList.remove("active");
+      caret.classList.remove("active", "engaged", "blinking");
       return;
     }
     caret.style.left = `${point.left}px`; caret.style.top = `${point.top}px`; caret.style.height = `${point.height}px`;
-    caret.classList.add("active");
+    const phase = visualCaretPhase({ last_interaction_at: lastPromptCaretInteractionAt });
+    caret.classList.remove("engaged", "blinking");
+    caret.classList.add("active", phase);
+    window.clearTimeout(promptCaretTimer);
+    if (phase === "engaged") promptCaretTimer = window.setTimeout(schedulePromptVisualCaret, 720);
   }
 
-  function schedulePromptVisualCaret() {
+  function schedulePromptVisualCaret(engaged = false) {
+    if (engaged) lastPromptCaretInteractionAt = Date.now();
     window.cancelAnimationFrame(promptCaretFrame);
     promptCaretFrame = window.requestAnimationFrame(() => {
       promptCaretFrame = window.requestAnimationFrame(updatePromptVisualCaret);
@@ -305,9 +358,10 @@ import { resolveVisualCaret } from "./imvia-prompt-layout.js?v=1";
   function installPromptVisualCaret() {
     if (!isLiveWorkbench() || document.documentElement.dataset.imviaPromptVisualCaretInstalled) return;
     document.documentElement.dataset.imviaPromptVisualCaretInstalled = "true";
-    for (const eventName of ["input", "keyup", "click", "select", "compositionupdate", "compositionend", "focusin", "focusout"]) {
-      document.addEventListener(eventName, schedulePromptVisualCaret, true);
+    for (const eventName of ["input", "keyup", "click", "select", "compositionupdate", "compositionend", "focusin"]) {
+      document.addEventListener(eventName, () => schedulePromptVisualCaret(true), true);
     }
+    document.addEventListener("focusout", () => schedulePromptVisualCaret(false), true);
     document.addEventListener("selectionchange", schedulePromptVisualCaret, true);
     window.addEventListener("resize", schedulePromptVisualCaret);
     window.addEventListener("scroll", schedulePromptVisualCaret, true);
@@ -434,7 +488,7 @@ import { resolveVisualCaret } from "./imvia-prompt-layout.js?v=1";
   function enhanceWorkbench() {
     if (!isLiveWorkbench()) return;
     injectProjectContext();
-    installLiveGenerationAction();
+    installWorkbenchHandoffAction();
     installPromptVisualCaret();
     installReferenceInsertionFix();
     loadProjectContext();

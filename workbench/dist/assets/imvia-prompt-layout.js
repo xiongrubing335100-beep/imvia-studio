@@ -13,3 +13,8 @@ export function resolveVisualCaret({ segments = [], selection_start: selectionSt
   }
   return null;
 }
+
+export function visualCaretPhase({ now = Date.now(), last_interaction_at: lastInteractionAt = null, hold_ms: holdMs = 700 } = {}) {
+  if (!Number.isFinite(lastInteractionAt)) return "blinking";
+  return now - lastInteractionAt <= holdMs ? "engaged" : "blinking";
+}

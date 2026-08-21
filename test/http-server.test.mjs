@@ -260,6 +260,49 @@ test("HTTP exposes project context and derives workbench Lovart activation", asy
   assert.equal(rejectedActivation.status, 400);
 });
 
+test("HTTP remembers a project and queues a Codex handoff without validating or calling Lovart", async (context) => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-http-handoff-"));
+  const calls = [];
+  const service = createWorkbenchService({ dataDirectory });
+  const projectContextService = {
+    async list() { return { active_lovart_project_id: null, projects: [] }; },
+    async remember(input) {
+      calls.push(["remember", input]);
+      return { project_id: "project-local", canvas_url: "https://www.lovart.ai/canvas?projectId=project-local" };
+    },
+    async select() { calls.push(["select"]); throw new Error("select must not run"); },
+  };
+  const orchestrator = { async submit() { calls.push(["submit"]); throw new Error("submit must not run"); } };
+  const server = await startHttpServer({ dataDirectory, service, projectContextService, orchestrator, port: 0 });
+  context.after(async () => { await server.close(); await rm(dataDirectory, { recursive: true, force: true }); });
+
+  const remembered = await fetch(`${server.url}/api/v1/lovart/projects/remember`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ locator: "project-local", source: "user_selected" }),
+  }).then((response) => response.json());
+  assert.equal(remembered.data.project_id, "project-local");
+
+  const uploaded = await fetch(`${server.url}/api/v1/workbench/assets`, {
+    method: "POST",
+    headers: { "content-type": "image/png" },
+    body: Buffer.from("local-image-bytes"),
+  }).then((response) => response.json());
+  assert.match(uploaded.data.attachment, /^imvia-upload:[0-9a-f-]+\.png$/u);
+  assert.equal(await readFile(path.join(dataDirectory, "workbench-uploads", uploaded.data.attachment.slice("imvia-upload:".length)), "utf8"), "local-image-bytes");
+
+  const submitted = await fetch(`${server.url}/api/v1/workbench/submissions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      idempotency_key: "http-handoff-1",
+      snapshot: { mode: "image", model: "Seedream 4.0", prompt: { text: "Send this to Codex", tokens: [] }, attachments: [uploaded.data.attachment], settings: { count: 1 } },
+    }),
+  }).then((response) => response.json());
+  assert.equal(submitted.data.status, "queued_for_agent");
+  assert.deepEqual(calls, [["remember", { locator: "project-local", source: "user_selected" }]]);
+});
+
 test("HTTP follow-up derives contextual activation and rejects client activation", async (context) => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-http-follow-up-"));
   const calls = [];

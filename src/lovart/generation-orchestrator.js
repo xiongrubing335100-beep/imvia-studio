@@ -105,6 +105,45 @@ export function createGenerationOrchestrator({
     return handleResult(job.status === "submitted" ? job : { ...job, status: "generating" }, resumed, idempotencyKey);
   }
 
+  async function uploadAttachments(values = []) {
+    const attachments = [];
+    for (const attachment of values) {
+      if (typeof attachment === "string" && attachment.startsWith(WORKBENCH_ASSET_PREFIX) && artifactTransfer?.prepareWorkspaceAsset) {
+        const preparedUpload = await artifactTransfer.prepareWorkspaceAsset({ asset_path: attachment.slice(WORKBENCH_ASSET_PREFIX.length) });
+        attachments.push((await generationService.upload(preparedUpload)).url);
+      } else if (typeof attachment === "string" && attachment.startsWith("imvia-upload:") && artifactTransfer?.prepareManagedUpload) {
+        const preparedUpload = await artifactTransfer.prepareManagedUpload({ asset_name: attachment.slice("imvia-upload:".length) });
+        attachments.push((await generationService.upload(preparedUpload)).url);
+      } else if (artifactTransfer?.prepareUpload && typeof attachment === "string" && !/^https:\/\//iu.test(attachment)) {
+        const preparedUpload = await artifactTransfer.prepareUpload({ local_path: attachment });
+        attachments.push((await generationService.upload(preparedUpload)).url);
+      } else attachments.push(attachment);
+    }
+    return attachments;
+  }
+
+  async function executeQueued(job, input, projectId, idempotencyKey) {
+    let currentJob = job;
+    try {
+      currentJob = (await workbenchService.updateLiveJob({ job_id: job.id, expected_status: "queued_for_agent", next_status: "uploading", attempt: job.attempt, source: LIVE_UPLOAD })).job;
+      const attachments = await uploadAttachments(input.attachments ?? []);
+      const result = await generationService.generate({
+        prompt: input.prompt,
+        project_id: projectId,
+        ...(input.thread_id ? { thread_id: input.thread_id } : {}),
+        ...(attachments.length ? { attachments } : {}),
+        ...(input.mode ? { mode: input.mode } : {}),
+        ...(input.prefer_models ? { prefer_models: input.prefer_models } : {}),
+        ...(input.include_tools?.length ? { include_tools: input.include_tools } : {}),
+      });
+      const submitted = await workbenchService.updateLiveJob({ job_id: currentJob.id, expected_status: "uploading", next_status: "submitted", attempt: currentJob.attempt, source: LIVE_SUBMIT, lovart_thread_id: result.thread_id });
+      return handleResult(submitted.job, result, idempotencyKey);
+    } catch (error) {
+      await markFailed(currentJob, LIVE_STATUS, error);
+      throw error;
+    }
+  }
+
   async function submit(input) {
     if (!input || typeof input.prompt !== "string" || !input.prompt.trim()) throw new DomainError("VALIDATION_FAILED", "prompt is required.", { field: "prompt" });
     if (!input.activation || typeof input.activation !== "object") throw new DomainError("VALIDATION_FAILED", "explicit Lovart activation is required.", { field: "activation" });
@@ -113,35 +152,33 @@ export function createGenerationOrchestrator({
     const snapshot = safeInputSnapshot({ ...input, prompt: input.prompt.trim() });
     const prepared = await workbenchService.createDirectGenerationJob({ snapshot, lovart_project_id: resolved.project_id, activation_source: input.activation, idempotency_key: input.idempotency_key });
     if (prepared.idempotent) return resumeExisting(prepared.job, null, input.idempotency_key);
-    let job = prepared.job;
-    try {
-      await workbenchService.updateLiveJob({ job_id: job.id, expected_status: "queued_for_agent", next_status: "uploading", attempt: job.attempt, source: LIVE_UPLOAD });
-      const attachments = [];
-      for (const attachment of input.attachments ?? []) {
-        if (typeof attachment === "string" && attachment.startsWith(WORKBENCH_ASSET_PREFIX) && artifactTransfer?.prepareWorkspaceAsset) {
-          const preparedUpload = await artifactTransfer.prepareWorkspaceAsset({ asset_path: attachment.slice(WORKBENCH_ASSET_PREFIX.length) });
-          attachments.push((await generationService.upload(preparedUpload)).url);
-        } else if (artifactTransfer?.prepareUpload && typeof attachment === "string" && !/^https:\/\//iu.test(attachment)) {
-          const preparedUpload = await artifactTransfer.prepareUpload({ local_path: attachment });
-          attachments.push((await generationService.upload(preparedUpload)).url);
-        } else attachments.push(attachment);
-      }
-      const result = await generationService.generate({
-        prompt: input.prompt.trim(),
-        project_id: resolved.project_id,
-        ...(input.thread_id ? { thread_id: input.thread_id } : {}),
-        ...(attachments.length ? { attachments } : {}),
-        ...(input.mode ? { mode: input.mode } : {}),
-        ...(input.prefer_models ? { prefer_models: input.prefer_models } : {}),
-        ...(input.include_tools?.length ? { include_tools: input.include_tools } : {}),
-      });
-      const submitted = await workbenchService.updateLiveJob({ job_id: job.id, expected_status: "uploading", next_status: "submitted", attempt: job.attempt, source: LIVE_SUBMIT, lovart_thread_id: result.thread_id });
-      job = submitted.job;
-      return handleResult(job, result, input.idempotency_key);
-    } catch (error) {
-      await markFailed(job, LIVE_STATUS, error);
-      throw error;
+    return executeQueued(prepared.job, { ...input, prompt: input.prompt.trim() }, resolved.project_id, input.idempotency_key);
+  }
+
+  async function executePrepared(input) {
+    const current = (await readJob(input)).job;
+    if (current.submission_kind !== "workbench_generation" || current.activation?.source !== "workbench_action") {
+      throw new DomainError("VALIDATION_FAILED", "The requested job is not a workbench submission.", { job_id: current.id });
     }
+    if (current.direct_generation) {
+      if (current.status === "queued_for_agent") {
+        return executeQueued(current, {
+          prompt: current.snapshot.prompt.text,
+          attachments: current.snapshot.attachments ?? [],
+          prefer_models: current.snapshot.model ? { [current.snapshot.mode]: [current.snapshot.model] } : undefined,
+        }, current.lovart_project_id, current.idempotency_key);
+      }
+      return resumeExisting(current, null, current.idempotency_key);
+    }
+    const resolved = current.lovart_project_id
+      ? await projectContextService.resolve({ explicit_locator: current.lovart_project_id })
+      : { project_id: (await projectContextService.create({ source: "auto_created" })).project_id, source: "auto_create" };
+    const activated = await workbenchService.activateWorkbenchSubmission({ job_id: current.id, lovart_project_id: resolved.project_id });
+    return executeQueued(activated.job, {
+      prompt: current.snapshot.prompt.text,
+      attachments: current.snapshot.attachments ?? [],
+      prefer_models: current.snapshot.model ? { [current.snapshot.mode]: [current.snapshot.model] } : undefined,
+    }, resolved.project_id, current.idempotency_key);
   }
 
   async function followUp(input) {
@@ -211,5 +248,5 @@ export function createGenerationOrchestrator({
     return importOrComplete(generating, result, `${job.id}:confirm`);
   }
 
-  return Object.freeze({ submit, followUp, get: readJob, confirm });
+  return Object.freeze({ submit, executePrepared, followUp, get: readJob, confirm });
 }

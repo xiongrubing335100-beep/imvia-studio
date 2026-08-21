@@ -88,6 +88,13 @@ export function createArtifactTransfer({ dataDirectory, fetchImpl = globalThis.f
     return { file_path: resolved };
   }
 
+  async function prepareManagedUpload({ asset_name: assetName }) {
+    if (typeof assetName !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(?:png|jpg|webp|mp4|mp3|wav)$/iu.test(assetName)) {
+      throw new DomainError("PATH_NOT_ALLOWED", "The managed workbench upload reference is invalid.");
+    }
+    return prepareUpload({ local_path: path.join(path.resolve(dataDirectory), "workbench-uploads", assetName) });
+  }
+
   async function downloadResults({ job_id: jobId, result }) {
     if (typeof jobId !== "string" || !/^[a-z0-9._-]+$/iu.test(jobId)) throw new DomainError("VALIDATION_FAILED", "job_id is invalid.", { field: "job_id" });
     const urls = collectArtifactUrls(result);
@@ -132,5 +139,5 @@ export function createArtifactTransfer({ dataDirectory, fetchImpl = globalThis.f
     }
   }
 
-  return Object.freeze({ prepareUpload, prepareWorkspaceAsset, downloadResults });
+  return Object.freeze({ prepareUpload, prepareWorkspaceAsset, prepareManagedUpload, downloadResults });
 }

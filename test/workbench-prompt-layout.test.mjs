@@ -13,3 +13,10 @@ test("visual caret stays after the final character when a reference chip is wide
   assert.deepEqual(resolveVisualCaret({ segments, selection_start: 7 }), point(210));
   assert.deepEqual(resolveVisualCaret({ segments, selection_start: 16 }), point(309));
 });
+
+test("a fresh pointer or keyboard interaction holds the visual caret before blinking", async () => {
+  const { visualCaretPhase } = await import("../workbench/dist/assets/imvia-prompt-layout.js");
+  assert.equal(visualCaretPhase({ now: 1_500, last_interaction_at: 1_000, hold_ms: 700 }), "engaged");
+  assert.equal(visualCaretPhase({ now: 1_701, last_interaction_at: 1_000, hold_ms: 700 }), "blinking");
+  assert.equal(visualCaretPhase({ now: 1_500, last_interaction_at: null, hold_ms: 700 }), "blinking");
+});

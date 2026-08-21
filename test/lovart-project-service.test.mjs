@@ -37,6 +37,19 @@ test("select validates an explicit Lovart project before activating it", async (
   assert.equal((await service.list()).active_lovart_project_id, "project-1");
 });
 
+test("remember stores an official project locator locally without contacting Lovart", async (context) => {
+  const { calls, service } = await createContext(context);
+  const remembered = await service.remember({
+    locator: "https://www.lovart.ai/canvas?projectId=project-local",
+    source: "user_selected",
+  });
+
+  assert.equal(remembered.project_id, "project-local");
+  assert.equal(remembered.canvas_url, "https://www.lovart.ai/canvas?projectId=project-local");
+  assert.deepEqual(calls, []);
+  assert.equal((await service.list()).active_lovart_project_id, "project-local");
+});
+
 test("create validates and activates a newly created project", async (context) => {
   const { calls, service } = await createContext(context);
   const created = await service.create({ name: "我的项目" });

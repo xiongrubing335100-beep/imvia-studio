@@ -27,6 +27,19 @@ test("prepareWorkspaceAsset accepts only bundled asset paths", async (context) =
   await assert.rejects(() => transfer.prepareWorkspaceAsset({ asset_path: "/etc/passwd" }), (error) => error.code === "PATH_NOT_ALLOWED");
 });
 
+test("prepareManagedUpload resolves only opaque workbench upload names", async (context) => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-artifact-transfer-managed-"));
+  context.after(() => rm(dataDirectory, { recursive: true, force: true }));
+  const assetName = "123e4567-e89b-42d3-a456-426614174000.png";
+  const localPath = path.join(dataDirectory, "workbench-uploads", assetName);
+  await mkdir(path.dirname(localPath), { recursive: true });
+  await writeFile(localPath, "image", { mode: 0o600 });
+  const transfer = createArtifactTransfer({ dataDirectory });
+
+  assert.deepEqual(await transfer.prepareManagedUpload({ asset_name: assetName }), { file_path: localPath });
+  await assert.rejects(() => transfer.prepareManagedUpload({ asset_name: "../secret.png" }), (error) => error.code === "PATH_NOT_ALLOWED");
+});
+
 test("downloadResults writes HTTPS artifacts under one deterministic job directory", async (context) => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-artifact-transfer-results-"));
   context.after(() => rm(dataDirectory, { recursive: true, force: true }));

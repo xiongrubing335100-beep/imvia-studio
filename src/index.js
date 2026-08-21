@@ -189,13 +189,49 @@ export function createServer({
     },
     async () => {
       const workbenchUrl = httpService?.workbench_url || httpService?.workbenchUrl || `http://127.0.0.1:${httpService?.port ?? configuredPort()}/workbench?imvia=live`;
+      let submissionCursor = null;
+      if (typeof service?.getState === "function") {
+        const state = await service.getState({ include: ["jobs"] });
+        submissionCursor = state.jobs?.at(-1)?.id ?? null;
+      }
       return toMcpResponse({
         api_version: "1",
         ok: true,
-        data: { workbench_url: workbenchUrl, placement: "right", mode: "live" },
+        data: { workbench_url: workbenchUrl, placement: "right", mode: "live", submission_cursor: submissionCursor },
       });
     },
   );
+  if (typeof service?.getState === "function" && typeof service?.createWorkbenchSubmission === "function") {
+    server.registerTool("imvia_wait_for_workbench_submission", {
+      description: "Wait briefly for a new IMVIA workbench button submission and return its immutable summary to Codex. Never calls Lovart.",
+      inputSchema: z.object({
+        after_job_id: z.string().min(1).nullable(),
+        timeout_ms: z.number().int().min(0).max(30_000).optional(),
+      }).strict(),
+    }, domainResponse(async ({ after_job_id: afterJobId, timeout_ms: timeoutMs = 30_000 }) => {
+      const deadline = Date.now() + timeoutMs;
+      do {
+        const state = await service.getState({ include: ["jobs"] });
+        const jobs = Array.isArray(state.jobs) ? state.jobs : [];
+        const cursorIndex = afterJobId == null ? -1 : jobs.findIndex((job) => job.id === afterJobId);
+        if (afterJobId != null && cursorIndex < 0) throw new DomainError("NOT_FOUND", "The workbench submission cursor is no longer available.", { after_job_id: afterJobId });
+        const submitted = jobs.slice(cursorIndex + 1).find((job) => job.submission_kind === "workbench_generation" && job.activation?.source === "workbench_action");
+        if (submitted) {
+          return {
+            submitted: true,
+            job_id: submitted.id,
+            status: submitted.status,
+            snapshot: submitted.snapshot,
+            lovart_project_id: submitted.lovart_project_id ?? null,
+            activation: submitted.activation,
+            next_cursor: submitted.id,
+          };
+        }
+        if (Date.now() >= deadline) return { submitted: false, next_cursor: afterJobId };
+        await new Promise((resolve) => setTimeout(resolve, Math.min(200, Math.max(1, deadline - Date.now()))));
+      } while (true);
+    }));
+  }
   server.registerTool("imvia_authorize_lovart_probe", {
     description: "Record an explicit current-session authorization for one read-only Lovart capability probe. Does not contact Lovart.",
     inputSchema: authorizeProbeInput,
@@ -241,6 +277,10 @@ export function createServer({
         idempotency_key: z.string().min(1),
       }).strict(),
     }, lovartResponse((input) => orchestrator.submit(input)));
+    server.registerTool("imvia_execute_workbench_submission", {
+      description: "Execute the exact immutable task previously submitted by the IMVIA workbench after Codex receives it. Project validation and Lovart side effects begin only here.",
+      inputSchema: z.object({ job_id: z.string().min(1) }).strict(),
+    }, lovartResponse((input) => orchestrator.executePrepared(input)));
     server.registerTool("imvia_get_generation", {
       description: "Read one redacted local Lovart generation job and its imported artifacts.",
       inputSchema: z.object({ job_id: z.string().min(1) }).strict(),

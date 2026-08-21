@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
-import { lstat, readFile, stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { lstat, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createWorkbenchService, DomainError } from "../domain/workbench-service.js";
@@ -23,6 +24,32 @@ function body(request) {
     request.on("error", reject);
   });
 }
+function binaryBody(request, maximumBytes = 50_000_000) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    request.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > maximumBytes) {
+        reject(new DomainError("VALIDATION_FAILED", "Uploaded workbench media is too large.", { maximum_bytes: maximumBytes }));
+        request.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on("end", () => resolve(Buffer.concat(chunks)));
+    request.on("error", reject);
+  });
+}
+
+const WORKBENCH_UPLOAD_EXTENSIONS = Object.freeze({
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/webp": ".webp",
+  "video/mp4": ".mp4",
+  "audio/mpeg": ".mp3",
+  "audio/wav": ".wav",
+});
 function send(response, status, payload) { response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }); response.end(JSON.stringify(payload)); }
 function envelope(data) { return { api_version: "1", ok: true, data }; }
 function errorPayload(error) { const known = error instanceof DomainError; return { api_version: "1", ok: false, error: { code: known ? error.code : "STORE_UNAVAILABLE", message: known ? error.message : "Local workbench service is unavailable.", retryable: known && ["REVISION_CONFLICT", "STATUS_CONFLICT"].includes(error.code), details: known ? error.details : {} } }; }
@@ -149,6 +176,10 @@ export async function startHttpServer({ dataDirectory, service: providedService,
         if (!projectContextService?.select) throw new DomainError("CONTEXT_UNAVAILABLE", "Lovart project context service is unavailable.");
         return send(response, 200, envelope(await projectContextService.select(await body(request))));
       }
+      if (request.method === "POST" && url.pathname === "/api/v1/lovart/projects/remember") {
+        if (!projectContextService?.remember) throw new DomainError("CONTEXT_UNAVAILABLE", "Lovart project context service is unavailable.");
+        return send(response, 200, envelope(await projectContextService.remember(await body(request))));
+      }
       if (request.method === "POST" && url.pathname === "/api/v1/lovart/projects/create") {
         if (!projectContextService?.create) throw new DomainError("CONTEXT_UNAVAILABLE", "Lovart project context service is unavailable.");
         return send(response, 200, envelope(await projectContextService.create(await body(request))));
@@ -163,6 +194,25 @@ export async function startHttpServer({ dataDirectory, service: providedService,
         if (Object.hasOwn(input, "activation")) throw new DomainError("VALIDATION_FAILED", "HTTP workbench actions derive their Lovart activation internally.", { field: "activation" });
         const result = await orchestrator.submit({ ...input, activation: { source: "workbench_action" } });
         return send(response, 202, envelope({ job_id: result.job.id, status: result.job.status, idempotent: result.idempotent ?? false }));
+      }
+      if (request.method === "POST" && url.pathname === "/api/v1/workbench/submissions") {
+        if (typeof service.createWorkbenchSubmission !== "function") throw new DomainError("CONTEXT_UNAVAILABLE", "Workbench handoff service is unavailable.");
+        const result = await service.createWorkbenchSubmission(await body(request));
+        return send(response, 202, envelope({ job_id: result.job.id, status: result.job.status, idempotent: result.idempotent ?? false }));
+      }
+      if (request.method === "POST" && url.pathname === "/api/v1/workbench/assets") {
+        if (typeof dataDirectory !== "string" || !path.isAbsolute(dataDirectory)) throw new DomainError("CONTEXT_UNAVAILABLE", "Workbench media storage is unavailable.");
+        const mediaType = String(request.headers["content-type"] || "").split(";", 1)[0].trim().toLowerCase();
+        const extension = WORKBENCH_UPLOAD_EXTENSIONS[mediaType];
+        if (!extension) throw new DomainError("FILE_TYPE_UNSUPPORTED", "Workbench media must be a supported image, video, or audio file.", { content_type: mediaType || null });
+        const bytes = await binaryBody(request);
+        if (!bytes.length) throw new DomainError("VALIDATION_FAILED", "Uploaded workbench media is empty.");
+        const uploadDirectory = path.join(path.resolve(dataDirectory), "workbench-uploads");
+        await mkdir(uploadDirectory, { recursive: true, mode: 0o700 });
+        const assetName = `${randomUUID()}${extension}`;
+        const localPath = path.join(uploadDirectory, assetName);
+        await writeFile(localPath, bytes, { mode: 0o600, flag: "wx" });
+        return send(response, 201, envelope({ attachment: `imvia-upload:${assetName}`, content_type: mediaType, size_bytes: bytes.length }));
       }
       if (request.method === "GET" && url.pathname === "/api/v1/state") {
         const include = (url.searchParams.get("include") || "").split(",").filter((value) => ["jobs", "artifacts"].includes(value));

@@ -36,6 +36,17 @@ export function createProjectContextService({ workbenchService, generationServic
     return result.active_project;
   }
 
+  async function remember({ locator, source = "user_selected" } = {}) {
+    const normalized = normalizeLovartProjectLocator(locator);
+    const result = await workbenchService.setLovartProject({
+      project_id: normalized.project_id,
+      canvas_url: normalized.canvas_url,
+      name: null,
+      source,
+    });
+    return result.active_project;
+  }
+
   async function create({ name = null, source = "auto_created" } = {}) {
     const created = await generationService.createProject({
       ...(typeof name === "string" && name.trim() ? { project_name: name.trim() } : {}),
@@ -79,5 +90,5 @@ export function createProjectContextService({ workbenchService, generationServic
     return { project_id: created.project_id, source: "auto_create" };
   }
 
-  return Object.freeze({ list, select, create, resolve });
+  return Object.freeze({ list, remember, select, create, resolve });
 }
