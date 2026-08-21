@@ -27,7 +27,7 @@ test("starts the independent imvia-studio MCP and responds to imvia_health", asy
   const listed = await client.listTools();
   assert.deepEqual(
     listed.tools.map((tool) => tool.name).sort(),
-    ["imvia_authorize_lovart_probe", "imvia_claim_cost_decision", "imvia_confirm_generation", "imvia_connect_lovart", "imvia_create_iteration", "imvia_generate", "imvia_get_account_status", "imvia_get_state", "imvia_health", "imvia_import_result", "imvia_list_pending_jobs", "imvia_lovart_status", "imvia_open_workbench", "imvia_patch_workbench", "imvia_prepare_generation", "imvia_probe_lovart_capabilities", "imvia_record_cost_decision", "imvia_update_account_status", "imvia_update_job"],
+    ["imvia_authorize_lovart_probe", "imvia_claim_cost_decision", "imvia_confirm_generation", "imvia_connect_lovart", "imvia_create_iteration", "imvia_create_lovart_project", "imvia_generate", "imvia_get_account_status", "imvia_get_generation", "imvia_get_state", "imvia_health", "imvia_import_result", "imvia_list_lovart_projects", "imvia_list_pending_jobs", "imvia_lovart_status", "imvia_open_workbench", "imvia_patch_workbench", "imvia_prepare_generation", "imvia_probe_lovart_capabilities", "imvia_record_cost_decision", "imvia_select_lovart_project", "imvia_update_account_status", "imvia_update_job"],
   );
 
   const result = await client.callTool({ name: "imvia_health", arguments: {} });

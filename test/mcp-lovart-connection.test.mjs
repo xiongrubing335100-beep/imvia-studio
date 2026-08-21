@@ -66,3 +66,30 @@ test("generation and confirmation use strict inputs and preserve explicit confir
   assert.equal(rejected.isError, true);
   assert.match(rejected.content[0].text, /Unrecognized key/);
 });
+
+test("activation-aware generation requires explicit Lovart context and exposes no credential fields", async (context) => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-mcp-activation-"));
+  const orchestrator = {
+    async submit(input) { return { job: { id: "job-1", status: "succeeded", activation: input.activation }, result: { final_status: "done" } }; },
+    async get() { return { job: { id: "job-1", status: "succeeded" }, artifacts: [] }; },
+    async confirm(input) { return { job: { id: input.job_id, status: "succeeded" }, result: { final_status: "done" } }; },
+  };
+  const server = createServer({
+    service: {},
+    probeService: { async authorize() {}, async probe() {} },
+    credentialService: { async status() { return { status: "connected" }; } },
+    generationService: { async connect() { return { status: "connected" }; }, async generate() {}, async confirm() {} },
+    orchestrator,
+    dataDirectory,
+  });
+  const client = new Client({ name: "imvia-activation-contract-test", version: "0.3.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  context.after(async () => { await client.close(); await server.close(); await rm(dataDirectory, { recursive: true, force: true }); });
+  const tool = (await client.listTools()).tools.find((item) => item.name === "imvia_generate");
+  assert.ok(tool);
+  assert.equal(JSON.stringify(tool.inputSchema).includes("access_key"), false);
+  const result = await client.callTool({ name: "imvia_generate", arguments: { prompt: "use Lovart", activation: { source: "codex_explicit" }, idempotency_key: "job-1" } });
+  assert.equal(result.structuredContent.data.job.activation.source, "codex_explicit");
+});

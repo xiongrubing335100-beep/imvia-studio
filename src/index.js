@@ -11,6 +11,9 @@ import { createLovartProbeService } from "./probe/probe-service.js";
 import { createProbeStore } from "./probe/probe-store.js";
 import { createCredentialService } from "./lovart/credentials.js";
 import { createGenerationService } from "./lovart/generation-service.js";
+import { createProjectContextService } from "./lovart/project-context-service.js";
+import { createArtifactTransfer } from "./lovart/artifact-transfer.js";
+import { createGenerationOrchestrator } from "./lovart/generation-orchestrator.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -26,6 +29,18 @@ const runProbeInput = z.object({
   authorization_id: z.string().trim().min(1),
   idempotency_key: z.string().trim().min(1),
 }).strict();
+export const activationSchema = z.discriminatedUnion("source", [
+  z.object({ source: z.literal("codex_explicit") }).strict(),
+  z.object({
+    source: z.literal("codex_context_continuation"),
+    parent_job_id: z.string().min(1).optional(),
+    artifact_id: z.string().min(1).optional(),
+  }).strict(),
+]).superRefine((value, context) => {
+  if (value.source === "codex_context_continuation" && !value.parent_job_id && !value.artifact_id) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "context continuation requires parent_job_id or artifact_id" });
+  }
+});
 
 function configuredPort() {
   const value = Number.parseInt(process.env.IMVIA_HTTP_PORT ?? "", 10);
@@ -95,6 +110,10 @@ const LOVART_ERROR_CODES = new Set([
   "UPSTREAM_SECURITY_REJECTED",
   "UPSTREAM_UNAVAILABLE",
   "UPSTREAM_UNREACHABLE",
+  "INVALID_LOVART_PROJECT",
+  "LOCAL_FILE_UNAVAILABLE",
+  "ARTIFACT_DOWNLOAD_FAILED",
+  "ARTIFACT_URL_NOT_ALLOWED",
 ]);
 
 function lovartResponse(action) {
@@ -130,6 +149,9 @@ export function createServer({
   probeService: providedProbeService,
   credentialService: providedCredentialService,
   generationService: providedGenerationService,
+  projectContextService: providedProjectContextService,
+  orchestrator: providedOrchestrator,
+  artifactTransfer: providedArtifactTransfer,
   httpService = null,
   dataDirectory: providedDataDirectory,
 } = {}) {
@@ -139,6 +161,17 @@ export function createServer({
   const probeService = providedProbeService ?? createProductionProbeService(stateDirectory);
   const credentialService = providedCredentialService ?? createCredentialService();
   const generationService = providedGenerationService ?? createGenerationService({ credentialService });
+  const projectContextService = providedProjectContextService ?? (
+    service?.getLovartProjects && generationService?.validateProject && generationService?.createProject
+      ? createProjectContextService({ workbenchService: service, generationService })
+      : null
+  );
+  const artifactTransfer = providedArtifactTransfer ?? (projectContextService ? createArtifactTransfer({ dataDirectory: stateDirectory }) : null);
+  const orchestrator = providedOrchestrator ?? (
+    projectContextService && generationService?.generate && generationService?.confirm && service?.createDirectGenerationJob
+      ? createGenerationOrchestrator({ projectContextService, workbenchService: service, generationService, artifactTransfer })
+      : null
+  );
   server.registerTool(
     "imvia_health",
     {
@@ -178,22 +211,61 @@ export function createServer({
     description: "Read the redacted local Lovart connection status without opening a dialog or returning credentials.",
     inputSchema: z.object({}).strict(),
   }, lovartResponse(() => credentialService.status()));
-  server.registerTool("imvia_generate", {
-    description: "Send a prompt to Lovart and return generated artifacts or a pending cost confirmation. Never confirms automatically.",
-    inputSchema: z.object({
-      prompt: z.string().min(1),
-      project_id: z.string().min(1).optional(),
-      thread_id: z.string().min(1).optional(),
-      attachments: z.array(z.string().min(1)).optional(),
-      mode: z.enum(["fast", "thinking"]).optional(),
-      prefer_models: z.record(z.array(z.string().min(1))).optional(),
-      include_tools: z.array(z.string().min(1)).optional(),
-    }).strict(),
-  }, lovartResponse((input) => generationService.generate(input)));
-  server.registerTool("imvia_confirm_generation", {
-    description: "Confirm a pending high-cost Lovart operation only after the user explicitly accepts the displayed cost.",
-    inputSchema: z.object({ thread_id: z.string().min(1) }).strict(),
-  }, lovartResponse((input) => generationService.confirm(input)));
+  if (projectContextService) {
+    server.registerTool("imvia_list_lovart_projects", {
+      description: "List normalized Lovart project context without returning credentials.",
+      inputSchema: z.object({}).strict(),
+    }, domainResponse(() => projectContextService.list()));
+    server.registerTool("imvia_select_lovart_project", {
+      description: "Validate and activate one official Lovart project locator.",
+      inputSchema: z.object({ locator: z.string().min(1), source: z.string().min(1).optional() }).strict(),
+    }, domainResponse((input) => projectContextService.select(input)));
+    server.registerTool("imvia_create_lovart_project", {
+      description: "Create and activate a new Lovart project through the fixed official endpoint.",
+      inputSchema: z.object({ name: z.string().min(1).optional() }).strict(),
+    }, domainResponse((input) => projectContextService.create(input)));
+  }
+  if (orchestrator) {
+    server.registerTool("imvia_generate", {
+      description: "Submit one explicitly activated Lovart generation through the shared IMVIA orchestrator. Never confirms automatically or falls back to another provider.",
+      inputSchema: z.object({
+        prompt: z.string().min(1),
+        project_locator: z.string().min(1).optional(),
+        thread_id: z.string().min(1).optional(),
+        attachments: z.array(z.string().min(1)).optional(),
+        mode: z.enum(["fast", "thinking"]).optional(),
+        prefer_models: z.record(z.array(z.string().min(1))).optional(),
+        include_tools: z.array(z.string().min(1)).optional(),
+        activation: activationSchema,
+        idempotency_key: z.string().min(1),
+      }).strict(),
+    }, lovartResponse((input) => orchestrator.submit(input)));
+    server.registerTool("imvia_get_generation", {
+      description: "Read one redacted local Lovart generation job and its imported artifacts.",
+      inputSchema: z.object({ job_id: z.string().min(1) }).strict(),
+    }, lovartResponse((input) => orchestrator.get(input)));
+    server.registerTool("imvia_confirm_generation", {
+      description: "Confirm one pending Lovart job only after explicit current-session acceptance with the exact cost binding.",
+      inputSchema: z.object({ job_id: z.string().min(1), attempt: z.number().int().positive(), cost_fingerprint: z.string().regex(/^[0-9a-f]{64}$/), decision_id: z.string().min(1) }).strict(),
+    }, lovartResponse((input) => orchestrator.confirm(input)));
+  } else {
+    server.registerTool("imvia_generate", {
+      description: "Send a prompt to Lovart and return generated artifacts or a pending cost confirmation. Never confirms automatically.",
+      inputSchema: z.object({
+        prompt: z.string().min(1),
+        project_id: z.string().min(1).optional(),
+        thread_id: z.string().min(1).optional(),
+        attachments: z.array(z.string().min(1)).optional(),
+        mode: z.enum(["fast", "thinking"]).optional(),
+        prefer_models: z.record(z.array(z.string().min(1))).optional(),
+        include_tools: z.array(z.string().min(1)).optional(),
+      }).strict(),
+    }, lovartResponse((input) => generationService.generate(input)));
+    server.registerTool("imvia_confirm_generation", {
+      description: "Confirm a pending high-cost Lovart operation only after the user explicitly accepts the displayed cost.",
+      inputSchema: z.object({ thread_id: z.string().min(1) }).strict(),
+    }, lovartResponse((input) => generationService.confirm(input)));
+  }
   server.registerTool("imvia_get_state", { description: "Read the current local IMVIA project and draft.", inputSchema: { include: z.array(z.enum(["jobs", "artifacts"])).optional() } }, domainResponse((input) => service.getState(input)));
   server.registerTool("imvia_get_account_status", {
     description: "Read the latest local account-capability cache without contacting Lovart.",
@@ -312,6 +384,9 @@ export async function startServer() {
   const probeService = createProductionProbeService(stateDirectory);
   const credentialService = createCredentialService();
   const generationService = createGenerationService({ credentialService });
+  const projectContextService = createProjectContextService({ workbenchService: service, generationService });
+  const artifactTransfer = createArtifactTransfer({ dataDirectory: stateDirectory });
+  const orchestrator = createGenerationOrchestrator({ projectContextService, workbenchService: service, generationService, artifactTransfer });
   const http = await startHttpServer({
     service,
     port: configuredPort(),
@@ -321,7 +396,7 @@ export async function startServer() {
     },
   });
   const httpService = { port: Number.parseInt(new URL(http.url).port, 10), url: http.url, workbench_url: http.workbenchUrl };
-  const server = createServer({ service, probeService, credentialService, generationService, httpService, dataDirectory: stateDirectory });
+  const server = createServer({ service, probeService, credentialService, generationService, projectContextService, artifactTransfer, orchestrator, httpService, dataDirectory: stateDirectory });
   const closeHttp = () => http.close().catch(() => undefined);
   process.stdin.once("end", closeHttp);
   process.once("SIGINT", closeHttp);

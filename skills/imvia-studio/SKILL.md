@@ -1,6 +1,6 @@
 ---
 name: imvia-studio
-description: Run IMVIA Studio's fixture-only Milestone 5 mock orchestration, optional Milestone 6 read-only probe, and explicit Milestone 7 Lovart connection/creation flow without exposing credentials or touching the existing Lovart plugin.
+description: Run IMVIA Studio's fixture-only Milestone 5 mock orchestration, optional Milestone 6 read-only probe, and explicitly activated Lovart creation flow without exposing credentials or touching the existing Lovart plugin.
 ---
 
 # IMVIA Studio
@@ -44,6 +44,27 @@ Write fixture status through `imvia_update_job`. Cache only sourced billing mode
 
 On revision/status conflict, unknown response, missing mock adapter, or failed confirmation, stop, re-read local state when safe, and explain the state. Do not skip a state, blindly replay a side effect, connect to real Lovart without the Milestone 7 user action, install a marketplace entry, or advance a fixture job into live execution.
 
+## Lovart activation and provider isolation
+
+Keep Codex's native generation capability and IMVIA/Lovart in separate provider
+contexts. A request may use Lovart only when the user explicitly addresses the
+plugin with `@`, names Lovart or IMVIA Studio, asks to use the Lovart plugin, or
+continues a clearly related active Lovart task with a parent job or artifact.
+Clicking a workbench action such as **发送生成** or **继续编辑** is also an
+explicit Lovart selection. The activation is task-scoped and must be recorded
+in the `activation` object passed to `imvia_generate`.
+
+If the user only asks for a generic image or video, use Codex's native ImageGen
+or video capability. A saved key, a connected status, an active Lovart project,
+or an earlier Lovart request alone never activates Lovart. A continuation is
+valid only with `parent_job_id` or `artifact_id`; ambiguous context uses the
+Codex default capability. Never call both providers for one request.
+
+Never silently fall back between providers: a Lovart failure stays a Lovart
+failure, and a Codex ImageGen failure stays a Codex failure. Never auto-confirm
+costs, change the selected provider, or put AK/SK into activation, prompt,
+project, job, HTTP, or MCP data.
+
 ## Milestone 6 read-only Lovart probe
 
 The user must explicitly request the read-only probe in the current conversation. General permission, a queued job, earlier approval, or a fixture decision is insufficient. Call `imvia_authorize_lovart_probe` before `imvia_probe_lovart_capabilities`.
@@ -67,12 +88,18 @@ The bundled workbench also exposes **连接 Lovart**. It uses the same local
 native dialog and returns only the redacted status; credentials never enter
 browser state or HTTP arguments.
 
-After a connected result, call `imvia_generate` with the user's original
-prompt. It may return `pending_confirmation`; show the amount and unit and
-wait for an explicit current-session acceptance before calling
-`imvia_confirm_generation`. Never auto-confirm, auto-retry a consumed action,
-or expose credential values. The existing Lovart plugin remains independent:
-do not import, execute, configure, reconnect, or modify it.
+After a connected result, resolve the project with
+`imvia_list_lovart_projects`, `imvia_select_lovart_project`, or
+`imvia_create_lovart_project` as needed, then call `imvia_generate` with the
+user's original prompt, an explicit `activation`, and an idempotency key. If no
+project was selected, the first request creates one and later requests reuse
+the active project until the user selects another. It may return
+`pending_confirmation`; show the amount and unit and wait for an explicit
+current-session acceptance before calling `imvia_confirm_generation` with the
+exact job, attempt, fingerprint, and decision. Never auto-confirm, auto-retry
+a consumed action, or expose credential values. The existing Lovart plugin
+remains independent: do not import, execute, configure, reconnect, or modify
+it.
 
 The launcher uses a portable proxy policy: `IMVIA_PROXY_MODE=auto` (the
 default) honors standard proxy variables, then uses the macOS system HTTPS
