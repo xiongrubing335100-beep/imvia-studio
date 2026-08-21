@@ -73,7 +73,7 @@ function errorStatus(error) {
   return 400;
 }
 
-export async function startHttpServer({ dataDirectory, service: providedService, port = 4190, workbenchDirectory = DEFAULT_WORKBENCH_DIRECTORY, lovartConnection = null } = {}) {
+export async function startHttpServer({ dataDirectory, service: providedService, projectContextService = null, orchestrator = null, port = 4190, workbenchDirectory = DEFAULT_WORKBENCH_DIRECTORY, lovartConnection = null } = {}) {
   const service = providedService || createWorkbenchService({ dataDirectory });
   const eventClients = new Set();
   let eventId = 0;
@@ -111,9 +111,28 @@ export async function startHttpServer({ dataDirectory, service: providedService,
         if (typeof lovartConnection?.status !== "function") return send(response, 503, { api_version: "1", ok: false, error: { code: "CONNECTION_UNAVAILABLE", message: "Lovart connection service is unavailable.", retryable: true, details: {} } });
         return send(response, 200, envelope(await lovartConnection.status()));
       }
+      if (request.method === "GET" && url.pathname === "/api/v1/lovart/projects") {
+        if (!projectContextService?.list) throw new DomainError("CONTEXT_UNAVAILABLE", "Lovart project context service is unavailable.");
+        return send(response, 200, envelope(await projectContextService.list()));
+      }
+      if (request.method === "POST" && url.pathname === "/api/v1/lovart/projects/select") {
+        if (!projectContextService?.select) throw new DomainError("CONTEXT_UNAVAILABLE", "Lovart project context service is unavailable.");
+        return send(response, 200, envelope(await projectContextService.select(await body(request))));
+      }
+      if (request.method === "POST" && url.pathname === "/api/v1/lovart/projects/create") {
+        if (!projectContextService?.create) throw new DomainError("CONTEXT_UNAVAILABLE", "Lovart project context service is unavailable.");
+        return send(response, 200, envelope(await projectContextService.create(await body(request))));
+      }
       if (request.method === "POST" && url.pathname === "/api/v1/lovart/connect") {
         if (typeof lovartConnection?.connect !== "function") return send(response, 503, { api_version: "1", ok: false, error: { code: "CONNECTION_UNAVAILABLE", message: "Lovart connection service is unavailable.", retryable: true, details: {} } });
         return send(response, 200, envelope(await lovartConnection.connect()));
+      }
+      if (request.method === "POST" && url.pathname === "/api/v1/generations") {
+        if (!orchestrator?.submit) throw new DomainError("CONTEXT_UNAVAILABLE", "Lovart generation orchestrator is unavailable.");
+        const input = await body(request);
+        if (Object.hasOwn(input, "activation")) throw new DomainError("VALIDATION_FAILED", "HTTP workbench actions derive their Lovart activation internally.", { field: "activation" });
+        const result = await orchestrator.submit({ ...input, activation: { source: "workbench_action" } });
+        return send(response, 202, envelope({ job_id: result.job.id, status: result.job.status, idempotent: result.idempotent ?? false }));
       }
       if (request.method === "GET" && url.pathname === "/api/v1/state") {
         const include = (url.searchParams.get("include") || "").split(",").filter((value) => ["jobs", "artifacts"].includes(value));
@@ -145,6 +164,17 @@ export async function startHttpServer({ dataDirectory, service: providedService,
       if (request.method === "POST" && artifactMatch) {
         const imported = await service.importResult({ ...(await body(request)), job_id: decodeURIComponent(artifactMatch[1]) });
         return send(response, 200, envelope({ job_id: imported.job.id, status: imported.job.status, results: imported.results, idempotent: imported.idempotent }));
+      }
+      const jobMatch = url.pathname.match(/^\/api\/v1\/jobs\/([^/]+)$/);
+      if (request.method === "GET" && jobMatch) {
+        if (!orchestrator?.get) throw new DomainError("CONTEXT_UNAVAILABLE", "Lovart generation orchestrator is unavailable.");
+        return send(response, 200, envelope(await orchestrator.get({ job_id: decodeURIComponent(jobMatch[1]) })));
+      }
+      const costDecisionMatch = url.pathname.match(/^\/api\/v1\/jobs\/([^/]+)\/cost-decisions$/);
+      if (request.method === "POST" && costDecisionMatch) {
+        if (!orchestrator?.confirm) throw new DomainError("CONTEXT_UNAVAILABLE", "Lovart generation orchestrator is unavailable.");
+        const input = await body(request);
+        return send(response, 200, envelope(await orchestrator.confirm({ ...input, job_id: decodeURIComponent(costDecisionMatch[1]) })));
       }
       send(response, 404, { api_version: "1", ok: false, error: { code: "NOT_FOUND", message: "Route not found.", retryable: false, details: {} } });
     } catch (error) { send(response, errorStatus(error), errorPayload(error)); }

@@ -226,3 +226,54 @@ test("SSE forwards job lifecycle events", async (context) => {
   assert.match(await nextEvent, /event: job\.updated/);
   await reader.cancel();
 });
+
+test("HTTP exposes project context and derives workbench Lovart activation", async (context) => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-http-projects-"));
+  const calls = [];
+  const projectContextService = {
+    async list() { return { active_lovart_project_id: "project-1", projects: [{ project_id: "project-1", name: "项目", canvas_url: "https://www.lovart.ai/canvas?projectId=project-1" }] }; },
+    async select(input) { calls.push(["select", input]); return { project_id: "project-2", canvas_url: "https://www.lovart.ai/canvas?projectId=project-2" }; },
+    async create(input) { calls.push(["create", input]); return { project_id: "project-new", canvas_url: "https://www.lovart.ai/canvas?projectId=project-new" }; },
+  };
+  const orchestrator = {
+    async submit(input) { calls.push(["submit", input]); return { job: { id: "job-1", status: "queued_for_agent" } }; },
+    async get(input) { return { job: { id: input.job_id, status: "succeeded" }, artifacts: [] }; },
+    async confirm(input) { calls.push(["confirm", input]); return { job: { id: input.job_id, status: "succeeded" }, result: {} }; },
+  };
+  const service = createWorkbenchService({ dataDirectory });
+  const server = await startHttpServer({ dataDirectory, service, projectContextService, orchestrator, port: 0 });
+  context.after(async () => { await server.close(); await rm(dataDirectory, { recursive: true, force: true }); });
+
+  const projects = await fetch(`${server.url}/api/v1/lovart/projects`).then((response) => response.json());
+  assert.equal(projects.data.active_lovart_project_id, "project-1");
+  const selected = await fetch(`${server.url}/api/v1/lovart/projects/select`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ locator: "project-2" }) }).then((response) => response.json());
+  assert.equal(selected.data.project_id, "project-2");
+  const created = await fetch(`${server.url}/api/v1/lovart/projects/create`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "新项目" }) }).then((response) => response.json());
+  assert.equal(created.data.project_id, "project-new");
+  const generated = await fetch(`${server.url}/api/v1/generations`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: "A red apple", idempotency_key: "http-job" }) });
+  assert.equal(generated.status, 202);
+  assert.equal(calls.find(([name]) => name === "submit")[1].activation.source, "workbench_action");
+  assert.equal(JSON.stringify(generated).includes("accessKey"), false);
+  const rejectedActivation = await fetch(`${server.url}/api/v1/generations`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: "bad", activation: { source: "codex_explicit" }, idempotency_key: "http-bad" }) });
+  assert.equal(rejectedActivation.status, 400);
+});
+
+test("HTTP reads a redacted job and delegates exact cost confirmation", async (context) => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-http-job-routes-"));
+  const calls = [];
+  const server = await startHttpServer({
+    dataDirectory,
+    port: 0,
+    orchestrator: {
+      async get(input) { return { job: { id: input.job_id, status: "awaiting_cost_confirmation" }, artifacts: [] }; },
+      async confirm(input) { calls.push(input); return { job: { id: input.job_id, status: "succeeded" }, result: { final_status: "done" } }; },
+      async submit() { return { job: { id: "unused" } }; },
+    },
+  });
+  context.after(async () => { await server.close(); await rm(dataDirectory, { recursive: true, force: true }); });
+  const job = await fetch(`${server.url}/api/v1/jobs/job-1`).then((response) => response.json());
+  assert.equal(job.data.job.id, "job-1");
+  const confirmed = await fetch(`${server.url}/api/v1/jobs/job-1/cost-decisions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ attempt: 1, cost_fingerprint: "a".repeat(64), decision_id: "decision-1" }) }).then((response) => response.json());
+  assert.equal(confirmed.data.job.status, "succeeded");
+  assert.deepEqual(calls, [{ job_id: "job-1", attempt: 1, cost_fingerprint: "a".repeat(64), decision_id: "decision-1" }]);
+});

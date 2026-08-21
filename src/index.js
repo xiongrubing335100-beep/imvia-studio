@@ -389,6 +389,8 @@ export async function startServer() {
   const orchestrator = createGenerationOrchestrator({ projectContextService, workbenchService: service, generationService, artifactTransfer });
   const http = await startHttpServer({
     service,
+    projectContextService,
+    orchestrator,
     port: configuredPort(),
     lovartConnection: {
       connect: () => generationService.connect(),
