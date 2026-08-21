@@ -17,7 +17,7 @@ test("starts the independent imvia-studio MCP and responds to imvia_health", asy
     cwd: pluginRoot,
     env: { ...process.env, IMVIA_DATA_DIR: dataDirectory, IMVIA_HTTP_PORT: "0" },
   });
-  const client = new Client({ name: "imvia-studio-test-client", version: "0.2.0" });
+  const client = new Client({ name: "imvia-studio-test-client", version: "0.3.0" });
   context.after(async () => {
     await client.close();
     await rm(dataDirectory, { recursive: true, force: true });
@@ -38,7 +38,7 @@ test("starts the independent imvia-studio MCP and responds to imvia_health", asy
     api_version: "1",
     ok: true,
     data: {
-      plugin_version: "0.2.0",
+      plugin_version: "0.3.0",
       schema_version: "1",
       server_id: "imvia-studio",
       http_service: {
