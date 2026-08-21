@@ -51,9 +51,14 @@ async function runNativeHelper({ mode = "configure", exec = execFile, helperPath
 
 async function defaultRunHelper() {
   const output = await runNativeHelper({ mode: "configure" });
-  return output === "Lovart credentials saved."
-    ? { configured: true }
-    : { configured: false, code: "CREDENTIAL_SETUP_INVALID" };
+  if (output === "Lovart credentials saved.") return { configured: true };
+  if (output === "Lovart connection cancelled.") {
+    return { configured: false, code: "CREDENTIAL_SETUP_CANCELLED" };
+  }
+  if (output === "Lovart keys are required.") {
+    return { configured: false, code: "CREDENTIAL_SETUP_INVALID" };
+  }
+  return { configured: false, code: "CREDENTIAL_SETUP_FAILED" };
 }
 
 async function defaultReadKeychain() {
@@ -133,7 +138,7 @@ export function createCredentialService({
       };
     }
     if (!setup?.configured) {
-      const code = setup?.code === "CREDENTIAL_SETUP_CANCELLED"
+      const code = ["CREDENTIAL_SETUP_CANCELLED", "CREDENTIAL_SETUP_INVALID", "CREDENTIAL_SETUP_FAILED"].includes(setup?.code)
         ? setup.code
         : "CREDENTIAL_SETUP_INVALID";
       return { status: "not_connected", code, message: messageFor(code) };

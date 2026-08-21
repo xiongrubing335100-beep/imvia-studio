@@ -40,7 +40,11 @@ func saveCredentials(accessKey: String, secretKey: String) -> Bool {
     let query = keychainQuery()
     let existingStatus = SecItemCopyMatching(query as CFDictionary, nil)
     if existingStatus == errSecSuccess {
-        return SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary) == errSecSuccess
+        return SecItemUpdate(query as CFDictionary, [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            kSecAttrSynchronizable as String: false,
+        ] as CFDictionary) == errSecSuccess
     }
     guard existingStatus == errSecItemNotFound else { return false }
     var item = query
