@@ -62,7 +62,7 @@ function errorStatus(error) {
   return 400;
 }
 
-export async function startHttpServer({ dataDirectory, service: providedService, port = 4190, workbenchDirectory = DEFAULT_WORKBENCH_DIRECTORY } = {}) {
+export async function startHttpServer({ dataDirectory, service: providedService, port = 4190, workbenchDirectory = DEFAULT_WORKBENCH_DIRECTORY, lovartConnection = null } = {}) {
   const service = providedService || createWorkbenchService({ dataDirectory });
   const eventClients = new Set();
   let eventId = 0;
@@ -82,6 +82,14 @@ export async function startHttpServer({ dataDirectory, service: providedService,
       }
       if (request.method === "GET" && await serveWorkbench(response, url.pathname, workbenchDirectory)) return;
       if (request.method === "GET" && url.pathname === "/api/v1/health") return send(response, 200, envelope({ status: "ok", bind: "127.0.0.1" }));
+      if (request.method === "GET" && url.pathname === "/api/v1/lovart/status") {
+        if (typeof lovartConnection?.status !== "function") return send(response, 503, { api_version: "1", ok: false, error: { code: "CONNECTION_UNAVAILABLE", message: "Lovart connection service is unavailable.", retryable: true, details: {} } });
+        return send(response, 200, envelope(await lovartConnection.status()));
+      }
+      if (request.method === "POST" && url.pathname === "/api/v1/lovart/connect") {
+        if (typeof lovartConnection?.connect !== "function") return send(response, 503, { api_version: "1", ok: false, error: { code: "CONNECTION_UNAVAILABLE", message: "Lovart connection service is unavailable.", retryable: true, details: {} } });
+        return send(response, 200, envelope(await lovartConnection.connect()));
+      }
       if (request.method === "GET" && url.pathname === "/api/v1/state") {
         const include = (url.searchParams.get("include") || "").split(",").filter((value) => ["jobs", "artifacts"].includes(value));
         return send(response, 200, envelope(await service.getState({ include })));

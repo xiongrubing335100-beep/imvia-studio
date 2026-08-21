@@ -26,6 +26,8 @@ static bundle. When a user asks to open or use IMVIA Studio, call
 right-side browser panel. The bundled page is served by the same loopback
 service as the MCP and uses the live local adapter (`?imvia=live`). No
 terminal, URL copy/paste, or separate frontend server is required.
+Its **连接 Lovart** control uses the same native credential flow as
+`imvia_connect_lovart`; only a redacted status is returned to the page.
 
 ## Architecture and scope
 
@@ -116,8 +118,8 @@ The workbench entry point is:
 
 ## No-terminal Lovart workflow
 
-In the workbench, call `imvia_connect_lovart` with `{}`. IMVIA opens a native
-macOS password-style dialog; enter the two Lovart keys there and choose
+Click **连接 Lovart** in the workbench (or call `imvia_connect_lovart` with
+`{}`). IMVIA opens a native macOS password-style dialog; enter the two Lovart keys there and choose
 **Connect**. The values are stored only in the IMVIA-owned Keychain item
 `ai.imvia.studio.lovart` and are never accepted as MCP arguments or returned
 to chat. The result contains only `connected`, `not_connected`, or a stable

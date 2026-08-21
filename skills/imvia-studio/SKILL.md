@@ -63,6 +63,10 @@ an empty object. The tool opens the native secure dialog; never ask the user to
 paste AK/SK into chat, MCP arguments, environment variables, or a file. The
 result is redacted. `imvia_lovart_status` reads only the redacted local state.
 
+The bundled workbench also exposes **连接 Lovart**. It uses the same local
+native dialog and returns only the redacted status; credentials never enter
+browser state or HTTP arguments.
+
 After a connected result, call `imvia_generate` with the user's original
 prompt. It may return `pending_confirmation`; show the amount and unit and
 wait for an explicit current-session acceptance before calling

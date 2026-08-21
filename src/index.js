@@ -310,9 +310,18 @@ export async function startServer() {
   const stateDirectory = process.env.IMVIA_DATA_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), "../.imvia-studio-dev");
   const service = createWorkbenchService({ dataDirectory: stateDirectory });
   const probeService = createProductionProbeService(stateDirectory);
-  const http = await startHttpServer({ service, port: configuredPort() });
+  const credentialService = createCredentialService();
+  const generationService = createGenerationService({ credentialService });
+  const http = await startHttpServer({
+    service,
+    port: configuredPort(),
+    lovartConnection: {
+      connect: () => generationService.connect(),
+      status: () => credentialService.status(),
+    },
+  });
   const httpService = { port: Number.parseInt(new URL(http.url).port, 10), url: http.url, workbench_url: http.workbenchUrl };
-  const server = createServer({ service, probeService, httpService, dataDirectory: stateDirectory });
+  const server = createServer({ service, probeService, credentialService, generationService, httpService, dataDirectory: stateDirectory });
   const closeHttp = () => http.close().catch(() => undefined);
   process.stdin.once("end", closeHttp);
   process.once("SIGINT", closeHttp);

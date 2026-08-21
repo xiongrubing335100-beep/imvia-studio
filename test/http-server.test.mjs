@@ -52,9 +52,35 @@ test("loopback HTTP server serves the bundled live IMVIA Studio workbench", asyn
   assert.match(script.headers.get("content-type") || "", /javascript/);
   assert.match(await script.text(), /IMVIA Studio/);
 
+  const bridge = await fetch(`${server.url}/assets/imvia-lovart-bridge.js`);
+  assert.equal(bridge.status, 200);
+  assert.match(await bridge.text(), /\/api\/v1\/lovart\/connect/);
+
   const root = await fetch(server.url, { redirect: "manual" });
   assert.equal(root.status, 302);
   assert.equal(root.headers.get("location"), "/workbench?imvia=live");
+});
+
+test("workbench connection routes expose only redacted Lovart status", async (context) => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-http-lovart-"));
+  const calls = [];
+  const server = await startHttpServer({
+    dataDirectory,
+    port: 0,
+    lovartConnection: {
+      status: async () => ({ status: "not_connected", code: "CREDENTIAL_REFERENCE_UNAVAILABLE" }),
+      connect: async () => { calls.push("connect"); return { status: "connected", checked_at: "2026-08-21T00:00:00.000Z", lovart: { reachable: true } }; },
+    },
+  });
+  context.after(async () => { await server.close(); await rm(dataDirectory, { recursive: true, force: true }); });
+
+  const status = await fetch(`${server.url}/api/v1/lovart/status`).then((response) => response.json());
+  assert.deepEqual(status.data, { status: "not_connected", code: "CREDENTIAL_REFERENCE_UNAVAILABLE" });
+  const connected = await fetch(`${server.url}/api/v1/lovart/connect`, { method: "POST", body: "{}" }).then((response) => response.json());
+  assert.equal(connected.data.status, "connected");
+  assert.deepEqual(calls, ["connect"]);
+  assert.equal(JSON.stringify(connected).includes("accessKey"), false);
+  assert.equal(JSON.stringify(connected).includes("secretKey"), false);
 });
 
 test("SSE emits the updated draft revision after a local patch", async (context) => {
