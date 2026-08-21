@@ -70,16 +70,69 @@ application.setActivationPolicy(.accessory)
 
 let accessLabel = NSTextField(labelWithString: "Access key")
 let secretLabel = NSTextField(labelWithString: "Secret key")
-let accessField = NSSecureTextField(frame: NSRect(x: 100, y: 42, width: 300, height: 24))
-let secretField = NSSecureTextField(frame: NSRect(x: 100, y: 6, width: 300, height: 24))
-accessLabel.frame = NSRect(x: 0, y: 42, width: 90, height: 24)
-secretLabel.frame = NSRect(x: 0, y: 6, width: 90, height: 24)
+let accessField = NSSecureTextField(frame: NSRect(x: 100, y: 78, width: 300, height: 24))
+let secretField = NSSecureTextField(frame: NSRect(x: 100, y: 42, width: 300, height: 24))
+accessLabel.frame = NSRect(x: 0, y: 78, width: 90, height: 24)
+secretLabel.frame = NSRect(x: 0, y: 42, width: 90, height: 24)
 
-let form = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 72))
+final class PasteController: NSObject {
+    let accessField: NSSecureTextField
+    let secretField: NSSecureTextField
+
+    init(accessField: NSSecureTextField, secretField: NSSecureTextField) {
+        self.accessField = accessField
+        self.secretField = secretField
+    }
+
+    private func clipboardText() -> String? {
+        NSPasteboard.general.string(forType: .string)
+    }
+
+    @objc func pasteAccess(_ sender: Any?) {
+        accessField.stringValue = clipboardText()?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    @objc func pasteSecret(_ sender: Any?) {
+        secretField.stringValue = clipboardText()?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    @objc func pasteBoth(_ sender: Any?) {
+        guard let text = clipboardText() else { return }
+        if let data = text.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data),
+           let payload = object as? [String: String],
+           let accessKey = payload["accessKey"],
+           let secretKey = payload["secretKey"] {
+            accessField.stringValue = accessKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            secretField.stringValue = secretKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            return
+        }
+        let lines = text
+            .split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard lines.count >= 2 else { return }
+        accessField.stringValue = lines[0]
+        secretField.stringValue = lines[1]
+    }
+}
+
+let pasteController = PasteController(accessField: accessField, secretField: secretField)
+let accessPasteButton = NSButton(title: "Paste", target: pasteController, action: #selector(PasteController.pasteAccess(_:)))
+let secretPasteButton = NSButton(title: "Paste", target: pasteController, action: #selector(PasteController.pasteSecret(_:)))
+let bothPasteButton = NSButton(title: "Paste both keys", target: pasteController, action: #selector(PasteController.pasteBoth(_:)))
+accessPasteButton.frame = NSRect(x: 410, y: 78, width: 78, height: 24)
+secretPasteButton.frame = NSRect(x: 410, y: 42, width: 78, height: 24)
+bothPasteButton.frame = NSRect(x: 100, y: 6, width: 120, height: 24)
+
+let form = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: 108))
 form.addSubview(accessLabel)
 form.addSubview(secretLabel)
 form.addSubview(accessField)
 form.addSubview(secretField)
+form.addSubview(accessPasteButton)
+form.addSubview(secretPasteButton)
+form.addSubview(bothPasteButton)
 
 let alert = NSAlert()
 alert.messageText = "Connect Lovart"
