@@ -13,11 +13,11 @@ import { createServer } from "../src/index.js";
 
 const expectedTools = [
   "imvia_authorize_lovart_probe", "imvia_claim_cost_decision",
-  "imvia_create_iteration", "imvia_get_account_status", "imvia_get_state",
-  "imvia_health", "imvia_import_result", "imvia_list_pending_jobs",
-  "imvia_patch_workbench", "imvia_prepare_generation",
-  "imvia_probe_lovart_capabilities", "imvia_record_cost_decision",
-  "imvia_update_account_status", "imvia_update_job",
+  "imvia_confirm_generation", "imvia_connect_lovart", "imvia_create_iteration",
+  "imvia_generate", "imvia_get_account_status", "imvia_get_state", "imvia_health",
+  "imvia_import_result", "imvia_list_pending_jobs", "imvia_lovart_status",
+  "imvia_patch_workbench", "imvia_prepare_generation", "imvia_probe_lovart_capabilities",
+  "imvia_record_cost_decision", "imvia_update_account_status", "imvia_update_job",
 ].sort();
 
 const originalSchemaHashes = {

@@ -9,6 +9,8 @@ import { createProbeAuthorizationService } from "./probe/authorization-service.j
 import { createProbeChildRunner } from "./probe/child-runner.js";
 import { createLovartProbeService } from "./probe/probe-service.js";
 import { createProbeStore } from "./probe/probe-store.js";
+import { createCredentialService } from "./lovart/credentials.js";
+import { createGenerationService } from "./lovart/generation-service.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -81,6 +83,41 @@ function domainResponse(action) {
   };
 }
 
+const LOVART_ERROR_CODES = new Set([
+  "AUTHENTICATION_FAILED",
+  "CREDENTIAL_REFERENCE_UNAVAILABLE",
+  "CREDENTIAL_SETUP_CANCELLED",
+  "CREDENTIAL_SETUP_FAILED",
+  "CREDENTIAL_SETUP_INVALID",
+  "PLATFORM_UNSUPPORTED",
+  "UPSTREAM_RATE_LIMITED",
+  "UPSTREAM_SCHEMA_UNRECOGNIZED",
+  "UPSTREAM_SECURITY_REJECTED",
+  "UPSTREAM_UNAVAILABLE",
+  "UPSTREAM_UNREACHABLE",
+]);
+
+function lovartResponse(action) {
+  return async (input) => {
+    try {
+      return toMcpResponse({ api_version: "1", ok: true, data: await action(input) });
+    } catch (error) {
+      const code = LOVART_ERROR_CODES.has(error?.code) ? error.code : "UPSTREAM_UNAVAILABLE";
+      const retryable = ["UPSTREAM_RATE_LIMITED", "UPSTREAM_UNAVAILABLE", "UPSTREAM_UNREACHABLE"].includes(code);
+      return toMcpResponse({
+        api_version: "1",
+        ok: false,
+        error: {
+          code,
+          message: error?.message || "Lovart upstream is unavailable",
+          retryable,
+          details: {},
+        },
+      });
+    }
+  };
+}
+
 function createProductionProbeService(stateDirectory) {
   const probeStore = createProbeStore({ dataDirectory: stateDirectory });
   const authorizationService = createProbeAuthorizationService({ store: probeStore });
@@ -91,6 +128,8 @@ function createProductionProbeService(stateDirectory) {
 export function createServer({
   service: providedService,
   probeService: providedProbeService,
+  credentialService: providedCredentialService,
+  generationService: providedGenerationService,
   httpService = null,
   dataDirectory: providedDataDirectory,
 } = {}) {
@@ -98,6 +137,8 @@ export function createServer({
   const stateDirectory = providedDataDirectory || process.env.IMVIA_DATA_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), "../.imvia-studio-dev");
   const service = providedService ?? createWorkbenchService({ dataDirectory: stateDirectory });
   const probeService = providedProbeService ?? createProductionProbeService(stateDirectory);
+  const credentialService = providedCredentialService ?? createCredentialService();
+  const generationService = providedGenerationService ?? createGenerationService({ credentialService });
   server.registerTool(
     "imvia_health",
     {
@@ -114,6 +155,30 @@ export function createServer({
     description: "Consume one authorization for a fixed, read-only Lovart connectivity and workbench-capability probe.",
     inputSchema: runProbeInput,
   }, domainResponse((input) => probeService.probe(input)));
+  server.registerTool("imvia_connect_lovart", {
+    description: "Open the secure native Lovart connection dialog and validate the connection. Keys never enter MCP arguments or results.",
+    inputSchema: z.object({}).strict(),
+  }, lovartResponse(() => generationService.connect()));
+  server.registerTool("imvia_lovart_status", {
+    description: "Read the redacted local Lovart connection status without opening a dialog or returning credentials.",
+    inputSchema: z.object({}).strict(),
+  }, lovartResponse(() => credentialService.status()));
+  server.registerTool("imvia_generate", {
+    description: "Send a prompt to Lovart and return generated artifacts or a pending cost confirmation. Never confirms automatically.",
+    inputSchema: z.object({
+      prompt: z.string().min(1),
+      project_id: z.string().min(1).optional(),
+      thread_id: z.string().min(1).optional(),
+      attachments: z.array(z.string().min(1)).optional(),
+      mode: z.enum(["fast", "thinking"]).optional(),
+      prefer_models: z.record(z.array(z.string().min(1))).optional(),
+      include_tools: z.array(z.string().min(1)).optional(),
+    }).strict(),
+  }, lovartResponse((input) => generationService.generate(input)));
+  server.registerTool("imvia_confirm_generation", {
+    description: "Confirm a pending high-cost Lovart operation only after the user explicitly accepts the displayed cost.",
+    inputSchema: z.object({ thread_id: z.string().min(1) }).strict(),
+  }, lovartResponse((input) => generationService.confirm(input)));
   server.registerTool("imvia_get_state", { description: "Read the current local IMVIA project and draft.", inputSchema: { include: z.array(z.enum(["jobs", "artifacts"])).optional() } }, domainResponse((input) => service.getState(input)));
   server.registerTool("imvia_get_account_status", {
     description: "Read the latest local account-capability cache without contacting Lovart.",
