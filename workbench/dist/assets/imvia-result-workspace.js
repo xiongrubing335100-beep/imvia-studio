@@ -1,3 +1,5 @@
+import { resolveVisualCaret } from "./imvia-prompt-layout.js?v=1";
+
 (() => {
   "use strict";
   const rootId = "imvia-live-result-workspace";
@@ -33,6 +35,10 @@
     #imvia-project-context .imvia-project-status{display:block;margin-top:8px;color:#778185;font-size:10px;line-height:1.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     #imvia-workbench-toast{position:fixed;z-index:240;left:50%;bottom:24px;transform:translateX(-50%);max-width:min(560px,calc(100vw - 40px));min-height:42px;padding:10px 18px;border:1px solid #334044;border-radius:22px;background:#171c1f;color:#dce5e6;box-shadow:0 10px 40px #0008;font-size:12px;line-height:1.4;text-align:center}
     #imvia-workbench-toast.error{color:#f0b2b2;border-color:#71454a}
+    .prompt-box textarea{caret-color:transparent!important}
+    #imvia-prompt-visual-caret{position:fixed;z-index:230;width:1.5px;pointer-events:none;background:#ecffff;opacity:0;transform:translateX(-.5px);box-shadow:0 0 3px #57d6d8}
+    #imvia-prompt-visual-caret.active{opacity:1;animation:imvia-caret-blink 1.05s steps(1,end) infinite}
+    @keyframes imvia-caret-blink{0%,48%{opacity:1}49%,100%{opacity:0}}
   `;
   const style = document.createElement("style"); style.textContent = css; document.head.appendChild(style);
   let current = null;
@@ -46,6 +52,7 @@
   let projectsLoaded = false;
   let projectLoading = false;
   let generationPending = false;
+  let promptCaretFrame = 0;
 
   const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[character]));
   const panel = () => document.querySelector(".live-result-panel");
@@ -210,6 +217,103 @@
     }, true);
   }
 
+  function firstRangeRect(node, start, end) {
+    const range = document.createRange();
+    range.setStart(node, start); range.setEnd(node, end);
+    const rects = Array.from(range.getClientRects());
+    return rects.find((rect) => rect.height > 0) || rects[0] || null;
+  }
+
+  function pointFromRect(rect, side = "left") {
+    if (!rect) return null;
+    return { left: side === "right" ? rect.right : rect.left, top: rect.top, height: Math.max(14, rect.height) };
+  }
+
+  function plainCaretPositions(child) {
+    const text = child.textContent || "";
+    const node = child.firstChild;
+    if (!node || !text) return [];
+    const positions = [];
+    for (let offset = 0; offset <= text.length; offset += 1) {
+      let point = null;
+      if (offset < text.length && text[offset] !== "\n") {
+        point = pointFromRect(firstRangeRect(node, offset, offset + 1));
+      } else if (offset > 0) {
+        const previous = firstRangeRect(node, offset - 1, offset);
+        if (text[offset - 1] === "\n") {
+          const lineHeight = Number.parseFloat(getComputedStyle(child).lineHeight) || previous?.height || 16;
+          const highlightLeft = document.querySelector(".prompt-highlights")?.getBoundingClientRect().left ?? previous?.left ?? 0;
+          point = { left: highlightLeft, top: (previous?.top ?? child.getBoundingClientRect().top) + lineHeight, height: Math.max(14, previous?.height || lineHeight) };
+        } else point = pointFromRect(previous, "right");
+      } else {
+        const rect = child.getBoundingClientRect();
+        point = { left: rect.left, top: rect.top, height: Math.max(14, rect.height) };
+      }
+      positions.push(point);
+    }
+    return positions;
+  }
+
+  function visualCaretSegments(highlight) {
+    return Array.from(highlight.children).map((child) => {
+      if (child.classList.contains("prompt-token")) {
+        const label = child.querySelector(".prompt-token-remove")?.getAttribute("aria-label")?.replace(/^删除引用\s*/u, "").trim() || "";
+        const rect = child.getBoundingClientRect();
+        const point = (side) => ({ left: side === "right" ? rect.right : rect.left, top: rect.top + 2, height: Math.max(14, rect.height - 4) });
+        return { kind: "token", source_length: label ? label.length + 1 : 0, start: point("left"), end: point("right") };
+      }
+      const text = child.textContent || "";
+      return { kind: "plain", source_length: text.length, positions: plainCaretPositions(child) };
+    });
+  }
+
+  function promptCaretElement() {
+    let caret = document.getElementById("imvia-prompt-visual-caret");
+    if (!caret) {
+      caret = document.createElement("span");
+      caret.id = "imvia-prompt-visual-caret";
+      caret.setAttribute("aria-hidden", "true");
+      document.body.appendChild(caret);
+    }
+    return caret;
+  }
+
+  function updatePromptVisualCaret() {
+    const caret = promptCaretElement();
+    const textarea = document.querySelector(".prompt-box textarea");
+    const highlight = document.querySelector(".prompt-highlights");
+    if (!textarea || !highlight || document.activeElement !== textarea || textarea.selectionStart !== textarea.selectionEnd) {
+      caret.classList.remove("active");
+      return;
+    }
+    const point = resolveVisualCaret({ segments: visualCaretSegments(highlight), selection_start: textarea.selectionStart });
+    if (!point || point.top < 0 || point.top > window.innerHeight || point.left < 0 || point.left > window.innerWidth) {
+      caret.classList.remove("active");
+      return;
+    }
+    caret.style.left = `${point.left}px`; caret.style.top = `${point.top}px`; caret.style.height = `${point.height}px`;
+    caret.classList.add("active");
+  }
+
+  function schedulePromptVisualCaret() {
+    window.cancelAnimationFrame(promptCaretFrame);
+    promptCaretFrame = window.requestAnimationFrame(() => {
+      promptCaretFrame = window.requestAnimationFrame(updatePromptVisualCaret);
+    });
+  }
+
+  function installPromptVisualCaret() {
+    if (!isLiveWorkbench() || document.documentElement.dataset.imviaPromptVisualCaretInstalled) return;
+    document.documentElement.dataset.imviaPromptVisualCaretInstalled = "true";
+    for (const eventName of ["input", "keyup", "click", "select", "compositionupdate", "compositionend", "focusin", "focusout"]) {
+      document.addEventListener(eventName, schedulePromptVisualCaret, true);
+    }
+    document.addEventListener("selectionchange", schedulePromptVisualCaret, true);
+    window.addEventListener("resize", schedulePromptVisualCaret);
+    window.addEventListener("scroll", schedulePromptVisualCaret, true);
+    schedulePromptVisualCaret();
+  }
+
   function installReferenceInsertionFix() {
     if (!isLiveWorkbench() || document.documentElement.dataset.imviaReferenceInsertionFixInstalled) return;
     document.documentElement.dataset.imviaReferenceInsertionFixInstalled = "true";
@@ -261,6 +365,7 @@
       const tokenTarget = event.target?.closest?.(".prompt-token");
       event.preventDefault();
       textarea.focus(); textarea.setSelectionRange(index, index);
+      schedulePromptVisualCaret();
       if (tokenTarget) event.stopImmediatePropagation();
     };
     document.addEventListener("mousedown", placeCaretAtVisualPoint, true);
@@ -330,8 +435,10 @@
     if (!isLiveWorkbench()) return;
     injectProjectContext();
     installLiveGenerationAction();
+    installPromptVisualCaret();
     installReferenceInsertionFix();
     loadProjectContext();
+    schedulePromptVisualCaret();
   }
 
   const reposition = () => { const element = document.getElementById(rootId); if (element) place(element); };
