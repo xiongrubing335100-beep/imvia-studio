@@ -213,32 +213,58 @@
   function installReferenceInsertionFix() {
     if (!isLiveWorkbench() || document.documentElement.dataset.imviaReferenceInsertionFixInstalled) return;
     document.documentElement.dataset.imviaReferenceInsertionFixInstalled = "true";
-    const placeCaretAfterReference = (event) => {
-      const textarea = event.target?.closest?.(".prompt-box textarea") || (event.target?.closest?.(".prompt-highlights") ? document.querySelector(".prompt-box textarea") : null);
-      if (!textarea || event.target?.closest?.(".prompt-token-remove")) return;
-      const tokens = Array.from(document.querySelectorAll(".prompt-highlights .prompt-token"));
-      if (!tokens.length) return;
+    function visualCaretIndex(event) {
+      const highlight = document.querySelector(".prompt-highlights");
+      const textarea = document.querySelector(".prompt-box textarea");
+      if (!highlight || !textarea) return null;
+      const target = event.target;
+      const tokenTarget = target?.closest?.(".prompt-token");
+      const textareaTarget = target?.closest?.(".prompt-box textarea");
+      const highlightTarget = target?.closest?.(".prompt-highlights");
+      if (!tokenTarget && !textareaTarget && !highlightTarget) return null;
+      if (target?.closest?.(".prompt-token-remove")) return null;
       const point = { x: event.clientX, y: event.clientY };
-      const token = tokens.find((candidate) => { const rect = candidate.getBoundingClientRect(); return point.x >= rect.left - 4 && point.x <= rect.right + 18 && point.y >= rect.top - 4 && point.y <= rect.bottom + 4; });
-      if (!token) return;
-      const label = token.querySelector(".prompt-token-remove")?.getAttribute("aria-label")?.replace(/^删除引用\s*/u, "").trim();
-      if (!label) return;
-      const raw = textarea.value || "";
-      let cursor = 0; let end = -1;
-      for (const candidate of tokens) {
-        const candidateLabel = candidate.querySelector(".prompt-token-remove")?.getAttribute("aria-label")?.replace(/^删除引用\s*/u, "").trim();
-        if (!candidateLabel) continue;
-        const index = raw.indexOf(`@${candidateLabel}`, cursor);
-        if (index < 0) continue;
-        end = index + candidateLabel.length + 1;
-        cursor = end;
-        if (candidate === token) break;
+      const children = Array.from(highlight.children);
+      let rawIndex = 0;
+      for (const child of children) {
+        if (child.classList.contains("prompt-token")) {
+          const label = child.querySelector(".prompt-token-remove")?.getAttribute("aria-label")?.replace(/^删除引用\s*/u, "").trim();
+          const source = label ? `@${label}` : "";
+          const rects = Array.from(child.getClientRects());
+          if (source && rects.some((rect) => point.x >= rect.left - 4 && point.x <= rect.right + 18 && point.y >= rect.top - 4 && point.y <= rect.bottom + 4)) return rawIndex + source.length;
+          rawIndex += source.length;
+          continue;
+        }
+        const text = child.textContent || "";
+        const node = child.firstChild;
+        if (!node || !text) { rawIndex += text.length; continue; }
+        for (let index = 0; index < text.length; index += 1) {
+          const range = document.createRange();
+          range.setStart(node, index); range.setEnd(node, index + 1);
+          const rects = Array.from(range.getClientRects());
+          for (const rect of rects) {
+            if (point.y < rect.top - 4 || point.y > rect.bottom + 4) continue;
+            if (point.x <= rect.left) return rawIndex + index;
+            if (point.x <= rect.right) return rawIndex + (point.x < rect.left + rect.width * 0.35 ? index : index + 1);
+          }
+        }
+        rawIndex += text.length;
       }
-      if (end < 0) return;
-      event.preventDefault(); event.stopImmediatePropagation(); textarea.focus(); textarea.setSelectionRange(end, end);
+      return null;
+    }
+
+    const placeCaretAtVisualPoint = (event) => {
+      const index = visualCaretIndex(event);
+      if (index == null) return;
+      const textarea = document.querySelector(".prompt-box textarea");
+      if (!textarea) return;
+      const tokenTarget = event.target?.closest?.(".prompt-token");
+      event.preventDefault();
+      textarea.focus(); textarea.setSelectionRange(index, index);
+      if (tokenTarget) event.stopImmediatePropagation();
     };
-    document.addEventListener("mousedown", placeCaretAfterReference, true);
-    document.addEventListener("click", placeCaretAfterReference, true);
+    document.addEventListener("mousedown", placeCaretAtVisualPoint, true);
+    document.addEventListener("click", placeCaretAtVisualPoint, true);
   }
 
   function place(element) {
