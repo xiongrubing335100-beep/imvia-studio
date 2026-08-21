@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { access, mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -8,20 +10,24 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 test("starts the independent imvia-studio MCP and responds to imvia_health", async (context) => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-mcp-health-"));
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [path.join(pluginRoot, "src/index.js")],
     cwd: pluginRoot,
-    env: { ...process.env, IMVIA_HTTP_PORT: "0" },
+    env: { ...process.env, IMVIA_DATA_DIR: dataDirectory, IMVIA_HTTP_PORT: "0" },
   });
-  const client = new Client({ name: "imvia-studio-test-client", version: "0.1.0" });
-  context.after(async () => client.close());
+  const client = new Client({ name: "imvia-studio-test-client", version: "0.2.0" });
+  context.after(async () => {
+    await client.close();
+    await rm(dataDirectory, { recursive: true, force: true });
+  });
   await client.connect(transport);
 
   const listed = await client.listTools();
   assert.deepEqual(
     listed.tools.map((tool) => tool.name).sort(),
-    ["imvia_claim_cost_decision", "imvia_create_iteration", "imvia_get_account_status", "imvia_get_state", "imvia_health", "imvia_import_result", "imvia_list_pending_jobs", "imvia_patch_workbench", "imvia_prepare_generation", "imvia_record_cost_decision", "imvia_update_account_status", "imvia_update_job"],
+    ["imvia_authorize_lovart_probe", "imvia_claim_cost_decision", "imvia_create_iteration", "imvia_get_account_status", "imvia_get_state", "imvia_health", "imvia_import_result", "imvia_list_pending_jobs", "imvia_patch_workbench", "imvia_prepare_generation", "imvia_probe_lovart_capabilities", "imvia_record_cost_decision", "imvia_update_account_status", "imvia_update_job"],
   );
 
   const result = await client.callTool({ name: "imvia_health", arguments: {} });
@@ -32,7 +38,7 @@ test("starts the independent imvia-studio MCP and responds to imvia_health", asy
     api_version: "1",
     ok: true,
     data: {
-      plugin_version: "0.1.0",
+      plugin_version: "0.2.0",
       schema_version: "1",
       server_id: "imvia-studio",
       http_service: {
@@ -49,4 +55,9 @@ test("starts the independent imvia-studio MCP and responds to imvia_health", asy
       },
     },
   });
+
+  await assert.rejects(
+    access(path.join(dataDirectory, "lovart-probe-state-v1.json")),
+    (error) => error?.code === "ENOENT",
+  );
 });

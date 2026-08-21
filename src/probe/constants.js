@@ -1,0 +1,16 @@
+export const PROBE_POLICY_VERSION = "lovart-readonly-probe-v1";
+export const PROBE_STATE_FILE = "lovart-probe-state-v1.json";
+export const PROBE_AUTHORIZATION_TTL_MS = 2 * 60 * 1000;
+export const PROBE_RESULT_TTL_MS = 5 * 60 * 1000;
+export const LOVART_ORIGIN = "https://lgw.lovart.ai";
+export const LOVART_PATH = "/v1/openapi/mode/query";
+export const LOVART_METHOD = "POST";
+export const LOVART_BODY = "{}";
+export const LOVART_TIMEOUT_MS = 8_000;
+export const LOVART_MAX_RESPONSE_BYTES = 65_536;
+export const LOVART_SKILL_VERSION = "1.0.11";
+export const LOVART_CLIENT_SHA256 = "39c68e32c2262f7f1b3890f684e33b149f9da3d5577fc591b7b4e640a87e4878";
+export const LOVART_SKILL_SHA256 = "561bba809f4ea2e4c4bbb1c02a34e494d21bb688e7a336a058156c26e71bd9d3";
+export const KEYCHAIN_SERVICE = "ai.imvia.studio.lovart-readonly";
+export const KEYCHAIN_ACCESS_ACCOUNT = "access-key";
+export const KEYCHAIN_SECRET_ACCOUNT = "secret-key";
