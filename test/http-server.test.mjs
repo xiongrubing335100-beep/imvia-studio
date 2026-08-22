@@ -130,7 +130,7 @@ test("workbench connects through form navigation when page request APIs are unav
   const bridgeSource = await fetch(`${server.url}${bridgePath}`).then((response) => response.text());
   assert.equal(bridgePath, "/assets/imvia-lovart-bridge-v3.js");
   assert.match(bridgeSource, /\/api\/v1\/lovart\/connect/);
-  assert.match(bridgeSource, /EventSource\("\/api\/v1\/events"\)/);
+  assert.doesNotMatch(bridgeSource, /EventSource\("\/api\/v1\/events"\)/);
 
   const connected = await fetch(`${server.url}/workbench/lovart/connect`, { method: "POST", redirect: "manual" });
   assert.equal(connected.status, 303);
