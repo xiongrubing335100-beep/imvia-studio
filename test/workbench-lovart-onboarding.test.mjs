@@ -19,6 +19,9 @@ test("workbench keeps onboarding separate from the connected-only status rail", 
   assert.ok(source.includes("document.cookie"));
   assert.ok(source.includes("Max-Age=31536000"));
   assert.ok(source.includes("localStorage"));
+  assert.ok(source.includes("imvia-lovart-onboarding-completed-v2"));
+  assert.ok(source.includes("rememberCompletedSetup"));
+  assert.ok(source.includes('state === "connected"'));
   assert.ok(source.includes('post("/api/v1/lovart/connect")'));
   assert.ok(source.includes("startFirstOpen"));
   assert.ok(app.includes("工作台已连接 · Lovart 未检测"));

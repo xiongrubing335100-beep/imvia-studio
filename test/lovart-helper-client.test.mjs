@@ -68,6 +68,21 @@ test("configures through the fixed operation and redacts the public result", asy
   assert.equal(JSON.stringify(result).includes("private"), false);
 });
 
+test("keeps the native credential dialog alive while the user is entering keys", async () => {
+  const client = createHelperClient({
+    resolveHelper: async () => ({ path: "/plugin/native/helper" }),
+    timeoutMs: 5,
+    spawnImpl: (_file, args) => fakeSpawn(args[0]),
+  });
+  const result = await client.configure({
+    validate: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return { accepted: true, code: "CONNECTED" };
+    },
+  });
+  assert.deepEqual(result, { status: "connected", code: "CONNECTED" });
+});
+
 test("passes only locale and local-store path metadata to the helper", async () => {
   const original = {
     LANG: process.env.LANG,

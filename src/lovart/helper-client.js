@@ -170,7 +170,12 @@ export function createHelperClient({
         if (!settled && code !== 0) finish(stableFailure("HELPER_LAUNCH_FAILED"));
         else if (!settled && buffer) finish(stableFailure("UPSTREAM_SECURITY_REJECTED"));
       });
-      timer = setTimeout(() => finish(stableFailure("HELPER_LAUNCH_FAILED")), Math.max(1, Number(timeout) || DEFAULT_TIMEOUT_MS));
+      // Credential entry is user-driven and may legitimately take longer than
+      // the background protocol timeout. Keep the native dialog alive until
+      // the user submits or cancels it; status/read/clear remain bounded.
+      if (operation !== "configure") {
+        timer = setTimeout(() => finish(stableFailure("HELPER_LAUNCH_FAILED")), Math.max(1, Number(timeout) || DEFAULT_TIMEOUT_MS));
+      }
       try {
         writeLine(child, { v: 1, type: "request", op: operation, request_id: requestId() });
       } catch (error) {
