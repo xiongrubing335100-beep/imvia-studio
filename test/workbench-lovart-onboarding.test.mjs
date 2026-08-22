@@ -16,6 +16,8 @@ test("workbench keeps onboarding separate from the connected-only status rail", 
   assert.equal(source.includes("重试连接"), false);
   assert.equal(source.includes("lovart.onboarding"), false);
   assert.equal(source.includes("sessionStorage"), false);
+  assert.ok(source.includes("document.cookie"));
+  assert.ok(source.includes("Max-Age=31536000"));
   assert.ok(source.includes("localStorage"));
   assert.ok(source.includes('post("/api/v1/lovart/connect")'));
   assert.ok(source.includes("startFirstOpen"));
