@@ -10,7 +10,7 @@ test("workbench keeps onboarding separate from the connected-only status rail", 
   const source = await readFile(path.join(root, "workbench/dist/assets/imvia-lovart-bridge-v3.js"), "utf8");
   const html = await readFile(path.join(root, "workbench/dist/index.html"), "utf8");
   assert.equal(source.includes("URLSearchParams"), false);
-  assert.equal(source.includes("Lovart 未连接"), false);
+  assert.equal(source.includes(["Lovart", "未连接"].join(" ")), false);
   assert.equal(source.includes("连接 Lovart</button>"), false);
   assert.ok(source.includes("Lovart 已连接"));
   assert.ok(source.includes("重试连接"));
