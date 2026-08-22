@@ -51,6 +51,11 @@ protected release workflow must run `cargo test`, build each target, sign the
 helpers, assemble `native/manifest.json`, and run
 `npm run verify:credential-helpers` before distribution.
 
+The release workflow now uploads each signed target artifact, requires the
+configured macOS codesign/notarization profile or Windows Authenticode subject,
+assembles all four artifacts, and verifies the resulting manifest before
+publishing the release artifact.
+
 ## Security observations
 
 - Access Key and Secret Key are exchanged only over the helper's private NDJSON
