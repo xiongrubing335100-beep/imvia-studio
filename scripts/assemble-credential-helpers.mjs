@@ -39,7 +39,7 @@ export async function assembleCredentialHelpers({ output, artifacts, allowUnsign
     let info;
     try { info = await lstat(source); } catch { fail("HELPER_NOT_PACKAGED"); }
     if (!info.isFile() || info.isSymbolicLink()) fail("UPSTREAM_SECURITY_REJECTED");
-    if (target.startsWith("darwin-") && (info.mode & 0o111) === 0) fail("UPSTREAM_SECURITY_REJECTED");
+    if (target.startsWith("darwin-") && !allowUnsigned && (info.mode & 0o111) === 0) fail("UPSTREAM_SECURITY_REJECTED");
     if (!allowUnsigned) {
       const signatureFile = path.join(artifactRoot, "signature.json");
       try {

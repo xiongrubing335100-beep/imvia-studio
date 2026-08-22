@@ -56,6 +56,7 @@ test("assembly rejects unsigned artifacts", async () => {
 test("personal assembly permits unsigned artifacts while retaining digests", async () => {
   const input = await fixture();
   await writeFile(path.join(input.artifacts["win32-x64"], "signature.json"), JSON.stringify({ signed: false, target: "win32-x64" }));
+  await chmod(path.join(input.artifacts["darwin-arm64"], targets["darwin-arm64"]), 0o644);
   const manifest = await assembleCredentialHelpers({ ...input, allowUnsigned: true });
   assert.deepEqual(await verifyCredentialHelpers({ pluginRoot: input.output }), manifest);
 });
