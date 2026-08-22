@@ -4,8 +4,12 @@ import { fileURLToPath } from "node:url";
 import { createHelperClient } from "./helper-client.js";
 import { resolveCredentialHelper } from "./helper-manifest.js";
 
+// Kept as deprecated identifiers for callers that imported the old names.
+// Personal builds no longer read or write these Keychain coordinates; the
+// native helper stores credentials in its private local file instead.
 export const LOVART_KEYCHAIN_SERVICE = "ai.imvia.studio.lovart";
 export const LOVART_KEYCHAIN_ACCOUNT = "credentials";
+export const LOVART_LOCAL_CREDENTIAL_FILE = "lovart-credentials-v1.json";
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
 const MESSAGES = Object.freeze({

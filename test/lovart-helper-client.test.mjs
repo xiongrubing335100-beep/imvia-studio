@@ -68,6 +68,36 @@ test("configures through the fixed operation and redacts the public result", asy
   assert.equal(JSON.stringify(result).includes("private"), false);
 });
 
+test("passes only locale and local-store path metadata to the helper", async () => {
+  const original = {
+    LANG: process.env.LANG,
+    IMVIA_DATA_DIR: process.env.IMVIA_DATA_DIR,
+    LOVART_SECRET: process.env.LOVART_SECRET,
+  };
+  process.env.LANG = "zh_CN.UTF-8";
+  process.env.IMVIA_DATA_DIR = "/Users/example/Documents/imvia stuio/.imvia-studio-dev";
+  process.env.LOVART_SECRET = "must-not-inherit";
+  try {
+    let options;
+    const client = createHelperClient({
+      resolveHelper: async () => ({ path: "/plugin/native/helper" }),
+      spawnImpl: (_file, args, spawnOptions) => {
+        options = spawnOptions;
+        return fakeSpawn(args[0]);
+      },
+    });
+    await client.status();
+    assert.equal(options.env.LANG, "zh_CN.UTF-8");
+    assert.equal(options.env.IMVIA_DATA_DIR, "/Users/example/Documents/imvia stuio/.imvia-studio-dev");
+    assert.equal(Object.hasOwn(options.env, "LOVART_SECRET"), false);
+  } finally {
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test("rejects duplicate candidate messages and terminates the child", async () => {
   const child = fakeSpawn("configure");
   const client = createHelperClient({

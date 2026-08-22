@@ -6,23 +6,21 @@ import test from "node:test";
 
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 
-test("native setup owns secure fields and local-only Keychain attributes", async () => {
+test("native setup owns secure fields and a private local file store", async () => {
   const source = await readFile(path.join(root, "native/credential-helper/src/store.rs"), "utf8");
   const macosStore = await readFile(path.join(root, "native/credential-helper/src/store/macos.rs"), "utf8");
   const ui = await readFile(path.join(root, "native/credential-helper/src/ui/macos.rs"), "utf8");
-  assert.match(source, /ai\.imvia\.studio\.lovart/);
-  assert.match(source, /credentials/);
+  assert.match(source, /private local file/i);
+  assert.match(macosStore, /LocalCredentialStore/);
+  assert.doesNotMatch(macosStore, /security_framework|generic_password|PasswordOptions/);
   assert.match(ui, /NSSecureTextField|secure/i);
-  assert.match(macosStore, /PasswordOptions::new_generic_password/);
-  assert.match(macosStore, /let bytes = generic_password\(options\)/);
+  assert.match(macosStore, /local-file based/i);
   assert.match(ui, /NSSecureTextField::new/);
   assert.match(ui, /access\.setEditable\(true\)/);
   assert.match(ui, /access\.setSelectable\(true\)/);
   assert.match(ui, /secret\.setEditable\(true\)/);
   assert.match(ui, /secret\.setSelectable\(true\)/);
   assert.match(ui, /NSAlertFirstButtonReturn/);
-  assert.match(macosStore, /ItemSearchOptions::new/);
-  assert.match(macosStore, /skip_authenticated_items\(true\)/);
   assert.equal(ui.includes("response.0"), false);
   assert.equal(source.includes("existing Lovart plugin"), false);
 });
