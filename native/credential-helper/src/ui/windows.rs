@@ -26,7 +26,7 @@ impl CredentialPrompt for WindowsCredentialPrompt {
             hwndParent: 0 as HWND,
             pszMessageText: caption.as_ptr(),
             pszCaptionText: caption.as_ptr(),
-            hbmBanner: 0,
+            hbmBanner: null_mut(),
         };
         let result = unsafe {
             CredUIPromptForWindowsCredentialsW(

@@ -1,4 +1,4 @@
-use std::ptr::{null, null_mut};
+use std::ptr::null_mut;
 
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Security::Credentials::{
