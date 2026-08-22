@@ -49,8 +49,8 @@ workbench action:
 
 ```text
 first imvia_open_workbench
-  -> native secure dialog (macOS or Windows)
-  -> IMVIA-owned credential store
+  -> native setup dialog (macOS or Windows)
+  -> IMVIA-owned private local file
   -> fixed Lovart mode check
   -> redacted connected/not-connected status
   -> imvia_generate / imvia_confirm_generation when the user asks to create
@@ -145,11 +145,12 @@ explicit and a failed Lovart request never falls back to Codex ImageGen.
 
 ## No-terminal Lovart workflow
 
-On the first workbench open, IMVIA opens the bundled native secure dialog when
-its own credential item is missing. Enter the two Lovart keys there; users do
-not need Swift, Xcode, Command Line Tools, or PowerShell. macOS uses
-`ai.imvia.studio.lovart` / `credentials`; Windows uses
-`IMVIA.Studio.Lovart`. The existing Lovart plugin is never queried or changed.
+On the first workbench open, IMVIA opens the bundled native setup dialog when
+its private local credential file is missing. Enter the two Lovart keys there;
+users do not need Swift, Xcode, Command Line Tools, or PowerShell. The keys are
+written to a `600`-permission file under `IMVIA_DATA_DIR` (or the user's
+`IMVIA Studio` config directory), never to macOS Keychain or Windows Credential
+Manager. The existing Lovart plugin is never queried or changed.
 `imvia_connect_lovart` remains an explicit retry/replacement action and
 `imvia_disconnect_lovart` deletes only the IMVIA-owned item.
 
@@ -161,7 +162,8 @@ current conversation. Confirmation is never automatic.
 
 If the connection is already configured, `imvia_lovart_status` reads the local
 redacted status without opening a dialog. Ordinary users never need a terminal
-or a developer tool for this flow.
+or a developer tool for this flow, and reinstalling the plugin does not show an
+OS credential authorization sheet.
 
 ## Probe setup and feature state
 

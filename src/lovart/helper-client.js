@@ -30,8 +30,14 @@ function redactedEnvelope(message) {
 
 function localeEnvironment() {
   const env = {};
+  // Pass only locale and path metadata. The local-file helper needs the
+  // selected data directory, but arbitrary environment variables (especially
+  // secrets) must never be inherited.
   for (const name of ["LANG", "LC_ALL", "LC_CTYPE", "LANGUAGE"]) {
     if (typeof process.env[name] === "string" && process.env[name].length <= 64) env[name] = process.env[name];
+  }
+  for (const name of ["HOME", "APPDATA", "USERPROFILE", "IMVIA_DATA_DIR"]) {
+    if (typeof process.env[name] === "string" && process.env[name].length <= 1024) env[name] = process.env[name];
   }
   return env;
 }

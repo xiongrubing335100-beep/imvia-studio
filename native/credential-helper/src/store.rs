@@ -14,6 +14,11 @@ pub trait CredentialStore {
     fn clear(&self) -> Result<(), HelperError>;
 }
 
+// Lovart connection credentials intentionally use a private local file. The
+// legacy service/target constants above remain only for source compatibility;
+// this helper never reads or writes those operating-system credential stores.
+pub mod local;
+
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(target_os = "windows")]
