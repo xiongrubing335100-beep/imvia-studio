@@ -314,7 +314,7 @@ impl CredentialStore for WindowsCredentialStore {
 
 - [ ] **Step 4: Implement the native Windows prompt**
 
-Use `CredUIPromptForWindowsCredentialsW`; map the username field to Access Key and the password field to Secret Key. Unpack with `CredUnPackAuthenticationBufferW`, zero and free the returned authentication buffer with `SecureZeroMemory` and `CoTaskMemFree`, and map `ERROR_CANCELLED` to `SETUP_CANCELLED`.
+Use `CredUIPromptForWindowsCredentialsW`; map the username field to Access Key and the password field to Secret Key. Unpack with `CredUnPackAuthenticationBufferW`, zero the returned authentication buffer with `zeroize` and free it with `CoTaskMemFree`, and map `ERROR_CANCELLED` to `SETUP_CANCELLED`.
 
 - [ ] **Step 5: Run Windows tests for both architectures**
 
