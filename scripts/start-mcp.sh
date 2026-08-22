@@ -45,8 +45,8 @@ case "$proxy_mode" in
   auto|system)
     if [ "$proxy_mode" = "auto" ] && { [ -n "${HTTPS_PROXY:-}" ] || [ -n "${HTTP_PROXY:-}" ] || [ -n "${ALL_PROXY:-}" ]; }; then
       export NODE_USE_ENV_PROXY=1
-    elif [ "$(uname -s 2>/dev/null || true)" = "Darwin" ]; then
-      proxy_url="$($node_binary "$script_directory/detect-system-proxy.mjs" 2>/dev/null || true)"
+    elif [ "$proxy_mode" = "system" ] || [ "$(uname -s 2>/dev/null || true)" = "Darwin" ]; then
+      proxy_url="$("$node_binary" "$script_directory/detect-system-proxy.mjs" 2>/dev/null || true)"
       if [ -n "${proxy_url:-}" ]; then
         export NODE_USE_ENV_PROXY=1
         export HTTPS_PROXY="${HTTPS_PROXY:-$proxy_url}"
