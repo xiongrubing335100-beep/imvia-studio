@@ -1,0 +1,15 @@
+# This lockfile is refreshed by the protected release build on the pinned Rust toolchain.
+version = 4
+
+[[package]]
+name = "imvia-credential-helper"
+version = "1.0.0"
+dependencies = [
+ "objc2-app-kit",
+ "objc2-foundation",
+ "security-framework",
+ "serde",
+ "serde_json",
+ "windows-sys",
+ "zeroize",
+]
