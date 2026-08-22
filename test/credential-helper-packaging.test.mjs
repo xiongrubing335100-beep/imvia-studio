@@ -52,3 +52,10 @@ test("assembly rejects unsigned artifacts", async () => {
   await writeFile(path.join(input.artifacts["win32-x64"], "signature.json"), JSON.stringify({ signed: false, target: "win32-x64" }));
   await assert.rejects(assembleCredentialHelpers(input), (error) => error.code === "UPSTREAM_SECURITY_REJECTED");
 });
+
+test("personal assembly permits unsigned artifacts while retaining digests", async () => {
+  const input = await fixture();
+  await writeFile(path.join(input.artifacts["win32-x64"], "signature.json"), JSON.stringify({ signed: false, target: "win32-x64" }));
+  const manifest = await assembleCredentialHelpers({ ...input, allowUnsigned: true });
+  assert.deepEqual(await verifyCredentialHelpers({ pluginRoot: input.output }), manifest);
+});
