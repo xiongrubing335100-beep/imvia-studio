@@ -1,8 +1,10 @@
-use objc2::{sel, MainThreadMarker};
+use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy, NSButton,
-    NSView, NSSecureTextField, NSTextField,
+    NSPasteboard, NSPasteboardTypeString, NSView, NSSecureTextField, NSTextField,
 };
+use objc2::rc::Retained;
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2_foundation::{ns_string, NSPoint, NSRect, NSSize};
 
 use crate::protocol::{CredentialPair, HelperError};
@@ -12,6 +14,58 @@ use crate::ui::{CredentialPrompt, PromptOutcome};
 /// falls back to a compiler or a shell script at runtime. The production build
 /// supplies the AppKit implementation; tests inject a prompt adapter instead.
 pub struct MacCredentialPrompt;
+
+/// Target for the accessory-view paste buttons.
+///
+/// The buttons must not target the text fields directly. Sending the generic
+/// `paste:` action to an `NSTextField` is host-dependent and, in the helper's
+/// AppKit process, could make the native prompt exit instead of inserting the
+/// clipboard text. A small Objective-C target keeps the dialog alive and
+/// performs the paste explicitly into the retained field.
+#[derive(Clone)]
+struct PasteControllerIvars {
+    access: Retained<NSTextField>,
+    secret: Retained<NSSecureTextField>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = PasteControllerIvars]
+    struct PasteController;
+
+    impl PasteController {
+        #[unsafe(method(pasteAccess:))]
+        fn paste_access(&self, _sender: Option<&AnyObject>) {
+            let pasteboard_type = unsafe { NSPasteboardTypeString };
+            if let Some(value) = NSPasteboard::generalPasteboard().stringForType(pasteboard_type) {
+                self.ivars().access.setStringValue(&value);
+            }
+        }
+
+        #[unsafe(method(pasteSecret:))]
+        fn paste_secret(&self, _sender: Option<&AnyObject>) {
+            let pasteboard_type = unsafe { NSPasteboardTypeString };
+            if let Some(value) = NSPasteboard::generalPasteboard().stringForType(pasteboard_type) {
+                self.ivars().secret.setStringValue(&value);
+            }
+        }
+    }
+
+    unsafe impl NSObjectProtocol for PasteController {}
+);
+
+impl PasteController {
+    fn new(
+        access: Retained<NSTextField>,
+        secret: Retained<NSSecureTextField>,
+        mtm: MainThreadMarker,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(PasteControllerIvars { access, secret });
+        // SAFETY: PasteController subclasses NSObject and does not override init.
+        unsafe { msg_send![super(this), init] }
+    }
+}
 
 impl CredentialPrompt for MacCredentialPrompt {
     fn prompt(&self) -> Result<PromptOutcome, HelperError> {
@@ -46,14 +100,15 @@ fn macos_prompt() -> Result<PromptOutcome, HelperError> {
     fields.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(350.0, 85.0)));
 
     // Keep a deterministic paste path available even when the host app or
-    // keyboard focus does not forward Cmd+V to the text field. NSControl's
-    // standard `paste:` action reads the general NSPasteboard and inserts the
-    // value into the target field without exposing it to Node or the browser.
+    // keyboard focus does not forward Cmd+V to the text field. The controller
+    // reads the general NSPasteboard in this process and inserts the value
+    // without exposing it to Node or the browser.
+    let paste_controller = PasteController::new(access.clone(), secret.clone(), mtm);
     let access_paste = unsafe {
         NSButton::buttonWithTitle_target_action(
             ns_string!("粘贴"),
-            Some(access.as_ref()),
-            Some(sel!(paste:)),
+            Some(paste_controller.as_ref()),
+            Some(sel!(pasteAccess:)),
             mtm,
         )
     };
@@ -61,8 +116,8 @@ fn macos_prompt() -> Result<PromptOutcome, HelperError> {
     let secret_paste = unsafe {
         NSButton::buttonWithTitle_target_action(
             ns_string!("粘贴"),
-            Some(secret.as_ref()),
-            Some(sel!(paste:)),
+            Some(paste_controller.as_ref()),
+            Some(sel!(pasteSecret:)),
             mtm,
         )
     };

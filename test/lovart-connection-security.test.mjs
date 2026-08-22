@@ -21,7 +21,12 @@ test("native setup owns secure fields and a private local file store", async () 
   assert.match(ui, /secret\.setEditable\(true\)/);
   assert.match(ui, /secret\.setSelectable\(true\)/);
   assert.match(ui, /NSButton::buttonWithTitle_target_action/);
-  assert.match(ui, /Some\(sel!\(paste:\)\)/);
+  assert.match(ui, /NSPasteboard::generalPasteboard/);
+  assert.match(ui, /NSPasteboardTypeString/);
+  assert.match(ui, /PasteController/);
+  assert.match(ui, /Some\(sel!\(pasteAccess:\)\)/);
+  assert.match(ui, /Some\(sel!\(pasteSecret:\)\)/);
+  assert.doesNotMatch(ui, /Some\(sel!\(paste:\)\)/);
   assert.match(ui, /粘贴/);
   assert.match(ui, /NSAlertFirstButtonReturn/);
   assert.equal(ui.includes("response.0"), false);
