@@ -1,7 +1,8 @@
 (() => {
   const initial = window.__IMVIA_LOVART_STATUS__ || { state: "setup_required", code: "SETUP_REQUIRED" };
+  const AUTO_START_KEY = "imvia-lovart-onboarding-started-v1";
   const messages = {
-    setup_required: "首次使用需要完成 Lovart 安全连接设置。",
+    setup_required: "首次打开会自动弹出 Lovart 密钥填写框。",
     setup_active: "正在打开安全输入框…",
     validating: "正在验证 Lovart 连接…",
     cancelled: "连接设置已取消，可以稍后重试。",
@@ -55,12 +56,30 @@
   async function post(pathname) {
     await fetch(pathname, { method: "POST" });
   }
+  function claimAutoStart() {
+    try {
+      if (window.sessionStorage.getItem(AUTO_START_KEY) === "1") return false;
+      window.sessionStorage.setItem(AUTO_START_KEY, "1");
+    } catch {
+      // Private browsing may deny sessionStorage; still honor this one page
+      // load and let the server-side onboarding state prevent duplicates.
+    }
+    return true;
+  }
+  function startFirstOpen() {
+    if (stateOf(initial).state !== "setup_required" || !claimAutoStart()) return;
+    retry.disabled = true;
+    void post("/api/v1/lovart/connect").finally(() => { retry.disabled = false; });
+  }
   retry.addEventListener("click", () => { retry.disabled = true; void post("/api/v1/lovart/connect").finally(() => { retry.disabled = false; }); });
   root.querySelector("[data-imvia-lovart-replace]").addEventListener("click", () => { void post("/api/v1/lovart/connect"); });
   root.querySelector("[data-imvia-lovart-disconnect]").addEventListener("click", () => {
     if (window.confirm("确定断开 IMVIA Studio 的 Lovart 连接吗？")) void post("/api/v1/lovart/disconnect");
   });
   render(initial);
+  // The first workbench open must launch the native key form immediately;
+  // users should not have to discover a secondary retry button first.
+  startFirstOpen();
 
   let poll;
   const events = new EventSource("/api/v1/events");

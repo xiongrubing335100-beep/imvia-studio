@@ -15,6 +15,9 @@ test("workbench keeps onboarding separate from the connected-only status rail", 
   assert.ok(source.includes("Lovart 已连接"));
   assert.ok(source.includes("重试连接"));
   assert.ok(source.includes("lovart.onboarding"));
+  assert.ok(source.includes("sessionStorage"));
+  assert.ok(source.includes('post("/api/v1/lovart/connect")'));
+  assert.ok(source.includes("startFirstOpen"));
   assert.ok(html.includes("imvia-lovart-bridge-v3.js"));
   assert.ok(html.includes("imvia-lovart-onboarding.css"));
   assert.equal(/type=["']password["']/i.test(source), false);
