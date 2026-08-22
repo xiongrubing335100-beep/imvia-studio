@@ -1,154 +1,118 @@
-import { execFile as defaultExecFile } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
+
+import { createHelperClient } from "./helper-client.js";
+import { resolveCredentialHelper } from "./helper-manifest.js";
 
 export const LOVART_KEYCHAIN_SERVICE = "ai.imvia.studio.lovart";
-export const LOVART_ACCESS_ACCOUNT = "access-key";
-export const LOVART_SECRET_ACCOUNT = "secret-key";
-
-const HELPER_PATH = fileURLToPath(new URL("../../scripts/configure-lovart.swift", import.meta.url));
-const execFile = promisify(defaultExecFile);
+export const LOVART_KEYCHAIN_ACCOUNT = "credentials";
+const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
 const MESSAGES = Object.freeze({
-  CREDENTIAL_SETUP_CANCELLED: "Lovart connection was cancelled.",
-  CREDENTIAL_SETUP_INVALID: "Both Lovart keys are required.",
-  CREDENTIAL_SETUP_FAILED: "Lovart connection setup failed.",
-  CREDENTIAL_REFERENCE_UNAVAILABLE: "Lovart credentials are not configured.",
-  PLATFORM_UNSUPPORTED: "Lovart connection setup requires macOS.",
+  CONNECTED: "Lovart is connected.",
+  SETUP_REQUIRED: "Lovart credentials are not configured.",
+  SETUP_CANCELLED: "Lovart connection was cancelled.",
+  SETUP_INVALID: "Both Lovart keys are required.",
+  HELPER_NOT_PACKAGED: "Lovart connection helper is not packaged correctly.",
+  HELPER_LAUNCH_FAILED: "Lovart connection helper could not be started.",
+  CREDENTIAL_STORE_DENIED: "The operating-system credential store denied access.",
+  PLATFORM_UNSUPPORTED: "Lovart connection is unavailable on this platform.",
+  UPSTREAM_SECURITY_REJECTED: "Lovart connection helper failed integrity verification.",
+  AUTHENTICATION_FAILED: "Lovart authentication was rejected.",
+  UPSTREAM_UNREACHABLE: "Lovart could not be reached for validation.",
 });
 
-function messageFor(code) {
-  return MESSAGES[code] || MESSAGES.CREDENTIAL_SETUP_FAILED;
+function messageFor(code) { return MESSAGES[code] || "Lovart connection setup failed."; }
+
+function publicCode(value, fallback = "SETUP_REQUIRED") {
+  return typeof value === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(value) ? value : fallback;
 }
 
-function isCredentialPair(value) {
-  return Boolean(
-    value
-      && typeof value === "object"
-      && typeof value.accessKey === "string"
-      && value.accessKey.trim()
-      && typeof value.secretKey === "string"
-      && value.secretKey.trim(),
-  );
-}
-
-async function runNativeHelper({ mode = "configure", exec = execFile, helperPath = HELPER_PATH } = {}) {
-  try {
-    const result = await exec("swift", [helperPath, mode], {
-      encoding: "utf8",
-      maxBuffer: 4096,
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    return String(result.stdout ?? result).trim();
-  } catch (error) {
-    const output = String(error?.stdout ?? "").trim();
-    if (output) return output;
-    throw error;
-  }
-}
-
-async function defaultRunHelper() {
-  const output = await runNativeHelper({ mode: "configure" });
-  if (output === "Lovart credentials saved.") return { configured: true };
-  if (output === "Lovart connection cancelled.") {
-    return { configured: false, code: "CREDENTIAL_SETUP_CANCELLED" };
-  }
-  if (output === "Lovart keys are required.") {
-    return { configured: false, code: "CREDENTIAL_SETUP_INVALID" };
-  }
-  return { configured: false, code: "CREDENTIAL_SETUP_FAILED" };
-}
-
-async function defaultReadKeychain() {
-  const output = await runNativeHelper({ mode: "read" });
-  let payload;
-  try {
-    payload = JSON.parse(output);
-  } catch {
-    return { accessKey: "", secretKey: "" };
-  }
+function publicResult(value, now) {
+  const status = value?.status === "connected" ? "connected" : "setup_required";
+  const code = publicCode(value?.code, status === "connected" ? "CONNECTED" : "SETUP_REQUIRED");
   return {
-    accessKey: typeof payload.accessKey === "string" ? payload.accessKey : "",
-    secretKey: typeof payload.secretKey === "string" ? payload.secretKey : "",
+    status,
+    code,
+    message: typeof value?.message === "string" && value.message.length <= 256 ? value.message : messageFor(code),
+    ...(status === "connected" ? { checked_at: value?.checked_at || new Date(now()).toISOString() } : {}),
   };
 }
 
+function errorFor(code) {
+  const error = new Error(messageFor(code));
+  error.code = code;
+  return error;
+}
+
 export function createCredentialService({
+  helperClient: providedHelperClient,
+  pluginRoot = PLUGIN_ROOT,
   platform = process.platform,
-  runHelper = defaultRunHelper,
-  readKeychain = defaultReadKeychain,
+  arch = process.arch,
   now = () => Date.now(),
 } = {}) {
-  const unsupported = () => ({
-    status: "unsupported",
-    code: "PLATFORM_UNSUPPORTED",
-    message: messageFor("PLATFORM_UNSUPPORTED"),
+  const helperClient = providedHelperClient ?? createHelperClient({
+    resolveHelper: () => resolveCredentialHelper({ pluginRoot, platform, arch }),
   });
 
-  async function getCredentials() {
-    if (platform !== "darwin") {
-      const error = new Error(messageFor("PLATFORM_UNSUPPORTED"));
-      error.code = "PLATFORM_UNSUPPORTED";
-      throw error;
-    }
-    let credentials;
-    try {
-      credentials = await readKeychain();
-    } catch {
-      const error = new Error(messageFor("CREDENTIAL_REFERENCE_UNAVAILABLE"));
-      error.code = "CREDENTIAL_REFERENCE_UNAVAILABLE";
-      throw error;
-    }
-    if (!isCredentialPair(credentials)) {
-      const error = new Error(messageFor("CREDENTIAL_REFERENCE_UNAVAILABLE"));
-      error.code = "CREDENTIAL_REFERENCE_UNAVAILABLE";
-      throw error;
-    }
-    return {
-      accessKey: credentials.accessKey.trim(),
-      secretKey: credentials.secretKey.trim(),
-    };
+  function unsupported() {
+    return { status: "unsupported", code: "PLATFORM_UNSUPPORTED", message: messageFor("PLATFORM_UNSUPPORTED") };
   }
 
   async function status() {
-    if (platform !== "darwin") return unsupported();
+    if (!((platform === "darwin" || platform === "win32") && (arch === "arm64" || arch === "x64"))) return unsupported();
     try {
-      await getCredentials();
-      return { status: "connected", checked_at: new Date(now()).toISOString() };
+      return publicResult(await helperClient.status(), now);
     } catch (error) {
-      const code = error?.code === "PLATFORM_UNSUPPORTED"
-        ? "PLATFORM_UNSUPPORTED"
-        : "CREDENTIAL_REFERENCE_UNAVAILABLE";
-      return { status: "not_connected", code, message: messageFor(code) };
+      const code = publicCode(error?.code, "HELPER_NOT_PACKAGED");
+      return { status: "setup_required", code, message: messageFor(code) };
     }
   }
 
-  async function connect() {
-    if (platform !== "darwin") return unsupported();
-    let setup;
+  async function getCredentials() {
+    if (!((platform === "darwin" || platform === "win32") && (arch === "arm64" || arch === "x64"))) throw errorFor("PLATFORM_UNSUPPORTED");
     try {
-      setup = await runHelper();
-    } catch {
-      return {
-        status: "not_connected",
-        code: "CREDENTIAL_SETUP_FAILED",
-        message: messageFor("CREDENTIAL_SETUP_FAILED"),
-      };
+      const pair = await helperClient.read();
+      if (!pair?.accessKey?.trim() || !pair?.secretKey?.trim()) throw errorFor("SETUP_REQUIRED");
+      return { accessKey: pair.accessKey.trim(), secretKey: pair.secretKey.trim() };
+    } catch (error) {
+      if (error?.code) throw error;
+      throw errorFor("SETUP_REQUIRED");
     }
-    if (!setup?.configured) {
-      const code = ["CREDENTIAL_SETUP_CANCELLED", "CREDENTIAL_SETUP_INVALID", "CREDENTIAL_SETUP_FAILED"].includes(setup?.code)
-        ? setup.code
-        : "CREDENTIAL_SETUP_INVALID";
-      return { status: "not_connected", code, message: messageFor(code) };
-    }
-    return status();
   }
 
-  return Object.freeze({ connect, status, getCredentials });
-}
+  async function connect({ validate, onState } = {}) {
+    if (!((platform === "darwin" || platform === "win32") && (arch === "arm64" || arch === "x64"))) return unsupported();
+    if (typeof validate !== "function") throw new TypeError("validate is required");
+    try {
+      const result = await helperClient.configure({
+        onState,
+        validate: async (credentials) => {
+          const verdict = await validate(credentials);
+          if (!verdict || typeof verdict.accepted !== "boolean") return { accepted: false, code: "SETUP_INVALID" };
+          return {
+            accepted: verdict.accepted,
+            code: publicCode(verdict.code, verdict.accepted ? "CONNECTED" : "AUTHENTICATION_FAILED"),
+            ...(typeof verdict.message === "string" ? { message: verdict.message } : {}),
+          };
+        },
+      });
+      return publicResult(result, now);
+    } catch (error) {
+      const code = publicCode(error?.code, "HELPER_LAUNCH_FAILED");
+      return { status: "setup_required", code, message: messageFor(code) };
+    }
+  }
 
-export function credentialHelperPath() {
-  return path.resolve(HELPER_PATH);
+  async function clear() {
+    if (!((platform === "darwin" || platform === "win32") && (arch === "arm64" || arch === "x64"))) return unsupported();
+    try { return publicResult(await helperClient.clear(), now); }
+    catch (error) {
+      const code = publicCode(error?.code, "CREDENTIAL_STORE_DENIED");
+      return { status: "setup_required", code, message: messageFor(code) };
+    }
+  }
+
+  return Object.freeze({ status, connect, getCredentials, clear });
 }

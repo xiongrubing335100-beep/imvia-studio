@@ -23,21 +23,19 @@ export function createGenerationService({
     return clientFactory(credentials);
   }
 
-  async function connect() {
-    const connection = await credentialService.connect();
-    if (connection.status !== "connected") return connection;
-    try {
-      const client = await clientForOperation();
-      await client.queryMode();
-      return { ...connection, lovart: { reachable: true } };
-    } catch (error) {
-      const safe = stableError(error);
-      return {
-        status: "not_connected",
-        code: safe.code,
-        message: safe.message,
-      };
-    }
+  async function connect({ onState } = {}) {
+    return credentialService.connect({
+      onState,
+      validate: async (credentials) => {
+        try {
+          await clientFactory(credentials).queryMode();
+          return { accepted: true, code: "CONNECTED" };
+        } catch (error) {
+          const safe = stableError(error);
+          return { accepted: false, code: safe.code, message: safe.message };
+        }
+      },
+    });
   }
 
   async function pollResult(client, threadId, projectId) {
