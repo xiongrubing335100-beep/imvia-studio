@@ -1,9 +1,9 @@
-use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
+use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy, NSButton,
     NSPasteboard, NSPasteboardTypeString, NSView, NSSecureTextField, NSTextField,
 };
-use objc2::rc::{Allocated, Retained};
+use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2_foundation::{ns_string, NSPoint, NSRect, NSSize};
 
@@ -61,7 +61,7 @@ impl PasteController {
         secret: Retained<NSSecureTextField>,
         mtm: MainThreadMarker,
     ) -> Retained<Self> {
-        let this: Allocated<Self> = Self::alloc(mtm).set_ivars(PasteControllerIvars { access, secret });
+        let this = Self::alloc(mtm).set_ivars(PasteControllerIvars { access, secret });
         // SAFETY: PasteController subclasses NSObject and does not override init.
         unsafe { msg_send![super(this), init] }
     }
