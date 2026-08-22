@@ -1,6 +1,6 @@
 {
   "name": "imvia-studio",
-  "version": "0.3.0+codex.20260822162102",
+  "version": "0.3.0+codex.20260822163633",
   "description": "Independent local IMVIA Studio MCP with first-run cross-platform Lovart onboarding and explicit creation controls.",
   "author": {
     "name": "IMVIA Studio"
