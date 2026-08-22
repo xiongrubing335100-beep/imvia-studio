@@ -60,7 +60,10 @@ test("starts the independent imvia-studio MCP and responds to imvia_health", asy
   assert.equal(opened.structuredContent.data.mode, "live");
   assert.equal(opened.structuredContent.data.placement, "right");
   assert.equal(opened.structuredContent.data.submission_cursor, null);
+  assert.equal(opened.structuredContent.data.onboarding.state, "setup_active");
   assert.match(opened.structuredContent.data.workbench_url, /^http:\/\/127\.0\.0\.1:\d+\/workbench\?imvia=live$/);
+  assert.equal(new URL(opened.structuredContent.data.workbench_url).searchParams.has("lovart"), false);
+  assert.equal(new URL(opened.structuredContent.data.workbench_url).searchParams.has("code"), false);
 
   await assert.rejects(
     access(path.join(dataDirectory, "lovart-probe-state-v1.json")),
