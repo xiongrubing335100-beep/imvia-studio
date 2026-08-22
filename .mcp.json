@@ -3,7 +3,7 @@
     "imvia-studio": {
       "title": "IMVIA Studio MCP",
       "description": "Independent local IMVIA Studio MCP with revision-safe state, task lifecycle, managed result import, and loopback HTTP/SSE.",
-      "command": "sh",
+      "command": "/bin/sh",
       "args": ["./scripts/start-mcp.sh"],
       "cwd": "."
     }

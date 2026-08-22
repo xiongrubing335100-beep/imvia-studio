@@ -41,8 +41,9 @@ export class JsonStore {
   #lockDirectory;
   #ownerPath;
   #testHooks;
+  #migrateState;
 
-  constructor({ dataDirectory, createInitialState, stateFileName = "state.json", testHooks }) {
+  constructor({ dataDirectory, createInitialState, stateFileName = "state.json", testHooks, migrateState }) {
     if (path.basename(stateFileName) !== stateFileName || !stateFileName.endsWith(".json")) {
       throw new TypeError("stateFileName must be a local .json filename");
     }
@@ -52,10 +53,25 @@ export class JsonStore {
     this.#lockDirectory = `${this.statePath}.lock`;
     this.#ownerPath = path.join(this.#lockDirectory, "owner.json");
     this.#testHooks = testHooks && typeof testHooks === "object" ? testHooks : null;
+    this.#migrateState = typeof migrateState === "function" ? migrateState : null;
   }
 
   async read() {
     await mkdir(this.dataDirectory, { recursive: true, mode: 0o700 });
+    if (this.#migrateState) {
+      return this.#withLock(async () => {
+        let state;
+        try {
+          state = await this.#readExisting();
+        } catch (error) {
+          if (error?.code !== "ENOENT") throw error;
+          const initial = this.createInitialState();
+          await this.#write(initial);
+          return clone(initial);
+        }
+        return this.#applyMigration(state);
+      });
+    }
     try {
       return await this.#readExisting();
     } catch (error) {
@@ -83,6 +99,7 @@ export class JsonStore {
         state = this.createInitialState();
         await this.#write(state);
       }
+      if (this.#migrateState) state = await this.#applyMigration(state);
       const result = await mutator(state);
       await this.#write(state);
       return clone(result);
@@ -93,6 +110,30 @@ export class JsonStore {
 
   async #readExisting() {
     return clone(JSON.parse(await readFile(this.statePath, "utf8")));
+  }
+
+  async #applyMigration(state) {
+    const result = await this.#migrateState(clone(state));
+    if (!result || typeof result !== "object" || !Object.hasOwn(result, "state") || typeof result.changed !== "boolean") {
+      throw new Error("State migration must return { state, changed }.");
+    }
+    const migrated = clone(result.state);
+    if (!result.changed) return migrated;
+
+    const oldVersion = typeof state?.schema_version === "string" ? state.schema_version : "unknown";
+    const newVersion = typeof migrated?.schema_version === "string" ? migrated.schema_version : "unknown";
+    const backupPath = `${this.statePath}.backup-v${oldVersion}-to-v${newVersion}`;
+    try {
+      await writeFile(backupPath, `${JSON.stringify(state, null, 2)}\n`, {
+        encoding: "utf8",
+        flag: "wx",
+        mode: 0o600,
+      });
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
+    await this.#write(migrated);
+    return migrated;
   }
 
   async #withLock(operation) {

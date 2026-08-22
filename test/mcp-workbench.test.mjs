@@ -31,7 +31,7 @@ test("MCP reads, patches, prepares, and lists only its local workbench state", a
   const tools = await client.listTools();
   assert.deepEqual(
     tools.tools.map((tool) => tool.name).sort(),
-    ["imvia_authorize_lovart_probe", "imvia_claim_cost_decision", "imvia_confirm_generation", "imvia_connect_lovart", "imvia_create_iteration", "imvia_generate", "imvia_get_account_status", "imvia_get_state", "imvia_health", "imvia_import_result", "imvia_list_pending_jobs", "imvia_lovart_status", "imvia_patch_workbench", "imvia_prepare_generation", "imvia_probe_lovart_capabilities", "imvia_record_cost_decision", "imvia_update_account_status", "imvia_update_job"],
+    ["imvia_authorize_lovart_probe", "imvia_claim_cost_decision", "imvia_confirm_generation", "imvia_connect_lovart", "imvia_create_iteration", "imvia_create_lovart_project", "imvia_disconnect_lovart", "imvia_execute_workbench_submission", "imvia_follow_up_generation", "imvia_generate", "imvia_get_account_status", "imvia_get_generation", "imvia_get_state", "imvia_health", "imvia_import_result", "imvia_list_lovart_projects", "imvia_list_pending_jobs", "imvia_lovart_status", "imvia_open_workbench", "imvia_patch_workbench", "imvia_prepare_generation", "imvia_probe_lovart_capabilities", "imvia_record_cost_decision", "imvia_select_lovart_project", "imvia_update_account_status", "imvia_update_job", "imvia_wait_for_workbench_submission"],
   );
 
   const initial = await client.callTool({ name: "imvia_get_state", arguments: {} });
@@ -65,6 +65,36 @@ test("MCP reads, patches, prepares, and lists only its local workbench state", a
 
   const pending = await client.callTool({ name: "imvia_list_pending_jobs", arguments: {} });
   assert.deepEqual(pending.structuredContent.data.jobs.map((job) => job.id), [prepared.structuredContent.data.job_id]);
+});
+
+test("MCP waits for a new workbench button submission and returns its exact summary to Codex", async (context) => {
+  const client = await connect(context);
+  const opened = await client.callTool({ name: "imvia_open_workbench", arguments: {} });
+  const cursor = opened.structuredContent.data.submission_cursor;
+
+  const response = await fetch(`${opened.structuredContent.data.workbench_url.replace(/\/workbench\?imvia=live$/u, "")}/api/v1/workbench/submissions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      idempotency_key: "mcp-handoff-1",
+      snapshot: {
+        mode: "image",
+        model: "Seedream 4.0",
+        prompt: { text: "Exact workbench summary", tokens: [] },
+        attachments: [],
+        settings: { ratio: "3:4", resolution: "2K", count: 1 },
+      },
+    }),
+  });
+  assert.equal(response.status, 202);
+
+  const received = await client.callTool({
+    name: "imvia_wait_for_workbench_submission",
+    arguments: { after_job_id: cursor, timeout_ms: 1_000 },
+  });
+  assert.equal(received.structuredContent.data.submitted, true);
+  assert.equal(received.structuredContent.data.snapshot.prompt.text, "Exact workbench summary");
+  assert.equal(received.structuredContent.data.activation.source, "workbench_action");
 });
 
 test("MCP caches fixture billing mode without inventing a balance", async (context) => {

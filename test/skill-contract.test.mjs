@@ -44,6 +44,29 @@ test("skill fixes the Milestone 6 read-only probe authorization boundary", async
   assert.ok(text.indexOf("imvia_authorize_lovart_probe", milestone6) < text.indexOf("imvia_probe_lovart_capabilities", milestone6));
 });
 
+test("skill hands a workbench button summary to Codex before any Lovart execution", async () => {
+  const text = await readFile(skillUrl, "utf8");
+  const normalized = text.replace(/\s+/gu, " ");
+  for (const phrase of [
+    "submission_cursor",
+    "imvia_wait_for_workbench_submission",
+    "read and summarize its immutable `snapshot` as the user's message to Codex",
+    "imvia_execute_workbench_submission",
+    "The workbench button only hands the summarized form to Codex. It never calls Lovart directly.",
+    "Never create a second job with `imvia_generate` for the same workbench submission.",
+  ]) assert.ok(normalized.includes(phrase), `missing workbench handoff contract: ${phrase}`);
+  assert.ok(text.indexOf("imvia_wait_for_workbench_submission") < text.indexOf("imvia_execute_workbench_submission"));
+});
+
+test("workbench browser actions only remember project context and queue Codex handoffs", async () => {
+  const source = await readFile(new URL("../workbench/dist/assets/imvia-result-workspace.js", import.meta.url), "utf8");
+  assert.ok(source.includes("/api/v1/lovart/projects/remember"));
+  assert.ok(source.includes("/api/v1/workbench/submissions"));
+  assert.ok(source.includes("任务摘要已发送给 Codex，等待 Codex 处理"));
+  assert.equal(source.includes("/api/v1/generations"), false);
+  assert.equal(source.includes("submitLiveGeneration"), false);
+});
+
 test("orchestration code has no real Lovart transport or credential fallback", async () => {
   const urls = [
     new URL("../src/orchestration/policy.js", import.meta.url),

@@ -13,7 +13,7 @@ const reviewedProductionHashes = Object.freeze({
   "scripts/set-lovart-readonly-probe.mjs": "fae16a18f93ab274b64053889b505c3c59e3404682c6a7266d55ae6372518b66",
   "scripts/verify-protected-paths.mjs": "0ee549fff97831b338460570661e85cfb15ee6a5368c48b97256478f48fe0886",
   "src/domain/model-capabilities.js": "53609d3eba84809c7988184b34a35aaf4ee790f9cffa6a80685477459d677b00",
-  "src/persistence/json-store.js": "f269ef6d307d7501432bea9c8d46c0a22364709c3b09dc30d88fab794712e1a9",
+  "src/persistence/json-store.js": "12469ba9bd44c9fe76bd79bb948961ab50404a7fe22e53044422ad1d5cf55204",
   "src/probe/authorization-service.js": "8b3eebe93d748599b14d4ab0415aa57ce6dbeed4a7626c5b09ac84de3f0bdd0c",
   "src/probe/capability-normalizer.js": "f3ee013051aa8db5367a61dc9c5bda38d543d8228c7fc044d62e48603e48fd09",
   "src/probe/child-core.js": "bbfd3b4676d81cdac39b35b0b6ebc5801fc3d1e712b4b2ccf99a9bf0df9c2939",
@@ -27,7 +27,7 @@ const reviewedProductionHashes = Object.freeze({
   "src/probe/summary-validator.js": "728d94ed8bdd12b880fa73c59983e98f8076c17262b59c6b02f111b434edc982",
   "src/probe/transport.js": "eb14acf43af1d0a6d86936cb79b5f4acab5f908914eafc2dfaaff843a1ca2f34",
 });
-const reviewedNormalizedIndexHash = "631f287f5b01ea479d6b7b3e9b387105d94c8ac076017aef03a787ec062b500e";
+const reviewedNormalizedIndexHash = "37eb664cedfaefe129773e8d6a6aeaa34070ba2ca26a50b933971fea371b2a40";
 
 const reviewedImports = Object.freeze({
   "scripts/configure-lovart-readonly.swift": ["AppKit", "Darwin", "Security"],
@@ -36,7 +36,7 @@ const reviewedImports = Object.freeze({
   "src/domain/model-capabilities.js": [],
   "src/index.js": [
     "./domain/timestamps.js", "./domain/workbench-service.js", "./http/server.js",
-    "./lovart/credentials.js", "./lovart/generation-service.js",
+    "./lovart/artifact-transfer.js", "./lovart/credentials.js", "./lovart/generation-orchestrator.js", "./lovart/generation-service.js", "./lovart/onboarding-service.js", "./lovart/project-context-service.js",
     "./probe/authorization-service.js", "./probe/child-runner.js", "./probe/probe-service.js",
     "./probe/probe-store.js", "@modelcontextprotocol/sdk/server/mcp.js",
     "@modelcontextprotocol/sdk/server/stdio.js", "node:path", "node:url", "zod",

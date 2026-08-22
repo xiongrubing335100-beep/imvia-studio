@@ -5,7 +5,7 @@ import { createGenerationService } from "../src/lovart/generation-service.js";
 
 function credentialService() {
   return {
-    async connect() { return { status: "connected", checked_at: "2026-08-21T00:00:00.000Z" }; },
+    async connect({ validate }) { return { status: "connected", checked_at: "2026-08-21T00:00:00.000Z", ...(await validate({ accessKey: "ak_test", secretKey: "sk_test" })).accepted ? {} : { status: "setup_required" } }; },
     async status() { return { status: "connected", checked_at: "2026-08-21T00:00:00.000Z" }; },
     async getCredentials() { return { accessKey: "ak_test", secretKey: "sk_test" }; },
   };
@@ -23,7 +23,6 @@ test("connect checks Lovart mode after the native credential flow", async () => 
   assert.deepEqual(await service.connect(), {
     status: "connected",
     checked_at: "2026-08-21T00:00:00.000Z",
-    lovart: { reachable: true },
   });
   assert.equal(queried, 1);
 });

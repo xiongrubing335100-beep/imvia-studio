@@ -6,7 +6,9 @@
   "description": "Independent IMVIA Studio MCP with an optional, default-disabled read-only Lovart capability probe.",
   "scripts": {
     "start": "sh scripts/start-mcp.sh",
-    "configure:lovart": "swift scripts/configure-lovart.swift configure",
+    "build:credential-helper": "cargo build --release --manifest-path native/credential-helper/Cargo.toml",
+    "test:credential-helper": "cargo test --manifest-path native/credential-helper/Cargo.toml",
+    "verify:credential-helpers": "node scripts/verify-credential-helpers.mjs",
     "test": "node --test test/*.test.mjs",
     "test:orchestration": "node --test test/source-policy.test.mjs test/cost-confirmation.test.mjs test/account-status.test.mjs test/iteration.test.mjs test/orchestration-policy.test.mjs test/fake-lovart-adapter.test.mjs test/agent-workflow.test.mjs test/skill-contract.test.mjs",
     "configure:lovart-readonly": "swift scripts/configure-lovart-readonly.swift",

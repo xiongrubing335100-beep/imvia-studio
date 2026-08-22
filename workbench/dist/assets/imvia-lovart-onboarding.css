@@ -1,0 +1,33 @@
+.imvia-lovart-shell {
+  position: fixed;
+  top: 14px;
+  right: 18px;
+  z-index: 9999;
+  color: #dce4e5;
+  font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.imvia-lovart-onboarding,
+.imvia-lovart-settings {
+  min-width: 250px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 12px;
+  background: rgba(22,25,27,.96);
+  box-shadow: 0 8px 24px rgba(0,0,0,.22);
+}
+.imvia-lovart-onboarding-title { margin: 0 0 5px; font-weight: 700; }
+.imvia-lovart-onboarding-detail { margin: 0 0 10px; color: #aeb9ba; }
+.imvia-lovart-onboarding button,
+.imvia-lovart-settings button {
+  border: 0;
+  border-radius: 8px;
+  padding: 7px 11px;
+  background: #e4f16b;
+  color: #16191b;
+  font-weight: 600;
+  cursor: pointer;
+}
+.imvia-lovart-connected { display: inline-block; padding: 8px 11px; border: 1px solid rgba(228,241,107,.35); border-radius: 10px; background: rgba(22,25,27,.94); color: #e4f16b; }
+.imvia-lovart-settings { margin-top: 8px; }
+.imvia-lovart-settings summary { cursor: pointer; color: #aeb9ba; }
+.imvia-lovart-settings button { margin: 9px 6px 0 0; }

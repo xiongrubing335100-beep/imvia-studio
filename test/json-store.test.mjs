@@ -132,6 +132,42 @@ test("JsonStore preserves state.json as the default", async () => {
   assert.deepEqual(JSON.parse(await readFile(path.join(dir, "state.json"), "utf8")), { version: 1 });
 });
 
+test("JsonStore migrates under its lock and writes a private pre-replacement backup", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "imvia-json-migration-"));
+  await writeFile(path.join(dir, "state.json"), '{"schema_version":"1","value":"old"}\n', { mode: 0o600 });
+  const store = new JsonStore({
+    dataDirectory: dir,
+    createInitialState: () => ({ schema_version: "1", value: "old" }),
+    migrateState: (state) => ({
+      state: { ...state, schema_version: "2", value: "new" },
+      changed: state.schema_version === "1",
+    }),
+  });
+  await store.read();
+  const migrated = JSON.parse(await readFile(path.join(dir, "state.json"), "utf8"));
+  assert.deepEqual(migrated, { schema_version: "2", value: "new" });
+  const backups = (await readdir(dir)).filter((entry) => entry.includes("backup-v1-to-v2"));
+  assert.equal(backups.length, 1);
+  assert.deepEqual(JSON.parse(await readFile(path.join(dir, backups[0]), "utf8")), { schema_version: "1", value: "old" });
+  await rm(dir, { recursive: true, force: true });
+});
+
+test("JsonStore preserves the original bytes when migration fails", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "imvia-json-migration-failure-"));
+  const statePath = path.join(dir, "state.json");
+  const original = '{"schema_version":"1","value":"old"}\n';
+  await writeFile(statePath, original, { mode: 0o600 });
+  const store = new JsonStore({
+    dataDirectory: dir,
+    createInitialState: () => ({ schema_version: "1" }),
+    migrateState: () => { throw new Error("migration failed"); },
+  });
+  await assert.rejects(() => store.read(), /migration failed/);
+  assert.equal(await readFile(statePath, "utf8"), original);
+  assert.deepEqual((await readdir(dir)).filter((entry) => entry.includes("backup-v1-to-v2")), []);
+  await rm(dir, { recursive: true, force: true });
+});
+
 test("JsonStore supports an isolated state filename with private permissions", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "imvia-json-store-"));
   const store = new JsonStore({

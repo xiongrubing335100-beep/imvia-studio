@@ -1,19 +1,34 @@
 {
   "name": "imvia-studio",
-  "version": "0.3.0",
-  "description": "Independent local IMVIA Studio MCP with one-click Lovart connection and explicit creation controls.",
+  "version": "0.3.0+codex.20260822065433",
+  "description": "Independent local IMVIA Studio MCP with first-run cross-platform Lovart onboarding and explicit creation controls.",
   "author": {
     "name": "IMVIA Studio"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "IMVIA Studio",
-    "shortDescription": "Local workbench with one-click Lovart connection.",
-    "longDescription": "IMVIA Studio provides isolated local MCP, JSON state, task lifecycle, managed result import, loopback HTTP/SSE services, a secure no-terminal Lovart connection flow, and explicit creation/cost confirmation controls. The existing Lovart plugin remains independent.",
+    "shortDescription": "Local workbench with independent Lovart onboarding.",
+    "longDescription": "IMVIA Studio provides isolated local MCP, JSON state, task lifecycle, managed result import, loopback HTTP/SSE services, a bundled cross-platform secure Lovart onboarding flow, and explicit creation/cost confirmation controls. The existing Lovart plugin remains independent.",
     "developerName": "IMVIA Studio",
     "category": "Creativity",
-    "capabilities": ["Local workbench state", "Revision-safe editing", "Task snapshots", "Sourced job lifecycle", "Managed result import", "Loopback HTTP and SSE", "One-click Lovart connection", "Explicit Lovart creation and cost confirmation", "Optional default-disabled read-only Lovart probe"],
-    "defaultPrompt": ["Check the IMVIA Studio MCP health."]
+    "capabilities": [
+      "Interactive web workbench",
+      "Local workbench state",
+      "Revision-safe editing",
+      "Task snapshots",
+      "Sourced job lifecycle",
+      "Managed result import",
+      "Loopback HTTP and SSE",
+      "One-click Lovart connection",
+      "Explicit Lovart creation and cost confirmation",
+      "Optional default-disabled read-only Lovart probe"
+    ],
+    "defaultPrompt": [
+      "Open the IMVIA Studio workbench",
+      "Connect Lovart from the IMVIA Studio workbench",
+      "Check the IMVIA Studio MCP health."
+    ]
   },
   "mcpServers": "./.mcp.json"
 }

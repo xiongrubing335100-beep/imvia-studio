@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -16,7 +16,9 @@ test("initializes and reloads a private local project and draft", async (context
   const { dataDirectory, service } = await createTestService(context);
   const initial = await service.getState();
 
-  assert.equal(initial.schema_version, "1");
+  assert.equal(initial.schema_version, "2");
+  assert.equal(initial.active_lovart_project_id, null);
+  assert.deepEqual(initial.lovart_projects, []);
   assert.equal(initial.projects.length, 1);
   assert.equal(initial.draft.revision, 0);
   assert.equal(initial.draft.mode, "video");
@@ -26,6 +28,107 @@ test("initializes and reloads a private local project and draft", async (context
   assert.equal(reloaded.project.id, initial.project.id);
   assert.equal(reloaded.draft.id, initial.draft.id);
   assert.equal(reloaded.draft.revision, 0);
+});
+
+test("persists the active Lovart project separately from the local project", async (context) => {
+  const { service } = await createTestService(context);
+  const selected = await service.setLovartProject({
+    project_id: "project-1",
+    name: "人物海报",
+    canvas_url: "https://www.lovart.ai/canvas?projectId=project-1",
+    source: "user_selected",
+  });
+
+  assert.equal(selected.active_project.project_id, "project-1");
+  assert.equal(selected.projects.length, 1);
+  const listed = await service.getLovartProjects();
+  assert.equal(listed.active_lovart_project_id, "project-1");
+  assert.equal(listed.projects[0].name, "人物海报");
+  assert.equal((await service.getState()).project.lovart_project_id, "project-1");
+
+  const recorded = await service.recordLovartProject({
+    project_id: "project-2",
+    name: "视频项目",
+    canvas_url: "https://www.lovart.ai/canvas?projectId=project-2",
+    source: "auto_created",
+  });
+  assert.equal(recorded.project.project_id, "project-2");
+  assert.equal((await service.getLovartProjects()).active_lovart_project_id, "project-1");
+});
+
+test("migrates legacy Lovart project ids without changing the local project", async (context) => {
+  const { dataDirectory, service } = await createTestService(context);
+  const initial = await service.getState();
+  const statePath = path.join(dataDirectory, "state.json");
+  const legacy = JSON.parse(await readFile(statePath, "utf8"));
+  legacy.schema_version = "1";
+  delete legacy.lovart_projects;
+  delete legacy.active_lovart_project_id;
+  legacy.projects[0].lovart_project_id = "legacy-project";
+  await writeFile(statePath, `${JSON.stringify(legacy, null, 2)}\n`, { mode: 0o600 });
+
+  const reloaded = createWorkbenchService({ dataDirectory });
+  const migrated = await reloaded.getState();
+  assert.equal(migrated.schema_version, "2");
+  assert.equal(migrated.project.id, initial.project.id);
+  assert.equal(migrated.active_lovart_project_id, "legacy-project");
+  assert.deepEqual(migrated.lovart_projects.map(({ project_id, canvas_url }) => ({ project_id, canvas_url })), [{
+    project_id: "legacy-project",
+    canvas_url: "https://www.lovart.ai/canvas?projectId=legacy-project",
+  }]);
+  const backupNames = (await readdir(dataDirectory)).filter((entry) => entry.includes("backup-v1-to-v2"));
+  assert.equal(backupNames.length, 1);
+  assert.equal(JSON.parse(await readFile(path.join(dataDirectory, backupNames[0]), "utf8")).schema_version, "1");
+});
+
+test("creates an immutable direct Lovart job snapshot with live activation evidence", async (context) => {
+  const { service } = await createTestService(context);
+  await service.setLovartProject({ project_id: "project-1", name: "项目一", source: "user_selected" });
+  const snapshot = { mode: "image", prompt: { text: "A cinematic portrait", tokens: [] }, settings: { ratio: "16:9" } };
+  const prepared = await service.createDirectGenerationJob({
+    snapshot,
+    lovart_project_id: "project-1",
+    activation_source: { source: "codex_explicit" },
+    idempotency_key: "direct-1",
+  });
+  assert.equal(prepared.job.status, "queued_for_agent");
+  assert.equal(prepared.job.lovart_project_id, "project-1");
+  assert.deepEqual(prepared.job.snapshot.activation, { source: "codex_explicit" });
+  const retry = await service.createDirectGenerationJob({
+    snapshot,
+    lovart_project_id: "project-1",
+    activation_source: { source: "codex_explicit" },
+    idempotency_key: "direct-1",
+  });
+  assert.equal(retry.idempotent, true);
+  assert.equal(retry.job.id, prepared.job.id);
+
+  await service.setLovartProject({ project_id: "project-2", source: "user_selected" });
+  const state = await service.getState({ include: ["jobs"] });
+  assert.equal(state.jobs[0].lovart_project_id, "project-1");
+  assert.equal(state.jobs[0].snapshot.lovart_project_id, "project-1");
+});
+
+test("live job transitions accept only named live evidence and exact attempts", async (context) => {
+  const { service } = await createTestService(context);
+  const { job } = await service.createDirectGenerationJob({
+    snapshot: { mode: "image", prompt: { text: "A tree", tokens: [] } },
+    lovart_project_id: "project-1",
+    activation_source: { source: "workbench" },
+    idempotency_key: "direct-live-1",
+  });
+  await assert.rejects(
+    () => service.updateLiveJob({ job_id: job.id, expected_status: "queued_for_agent", next_status: "uploading", attempt: 1, source: "fixture:lovart_submit" }),
+    (error) => error.code === "VALIDATION_FAILED",
+  );
+  const updated = await service.updateLiveJob({ job_id: job.id, expected_status: "queued_for_agent", next_status: "uploading", attempt: 1, source: "imvia:lovart_upload" });
+  assert.equal(updated.job.status, "uploading");
+  await assert.rejects(
+    () => service.updateLiveJob({ job_id: job.id, expected_status: "uploading", next_status: "submitted", attempt: 2, source: "imvia:lovart_submit" }),
+    (error) => error.code === "STATUS_CONFLICT",
+  );
+  const submitted = await service.updateLiveJob({ job_id: job.id, expected_status: "uploading", next_status: "submitted", attempt: 1, source: "imvia:lovart_submit" });
+  assert.equal(submitted.job.status, "submitted");
 });
 
 test("applies a field-level patch without overwriting unrelated draft values", async (context) => {
@@ -114,6 +217,31 @@ test("creates an immutable task snapshot and returns it for an idempotent retry"
   assert.equal(retry.job.id, prepared.job.id);
   assert.equal(retry.job.snapshot.prompt.text, "A cinematic rainy street.");
   assert.equal(state.jobs.length, 1);
+});
+
+test("stores a workbench button submission as an immutable Codex handoff without executing it", async (context) => {
+  const { service } = await createTestService(context);
+  await service.setLovartProject({ project_id: "project-from-form", source: "user_selected" });
+  const snapshot = {
+    mode: "image",
+    model: "Seedream 4.0",
+    prompt: { text: "  Use the two references.\n", tokens: [] },
+    attachments: ["imvia-workbench:/assets/person-reference.png"],
+    settings: { ratio: "3:4", resolution: "2K", count: 1 },
+  };
+
+  const submitted = await service.createWorkbenchSubmission({ snapshot, idempotency_key: "browser-submit-1" });
+  assert.equal(submitted.job.status, "queued_for_agent");
+  assert.equal(submitted.job.direct_generation, false);
+  assert.equal(submitted.job.activation.source, "workbench_action");
+  assert.equal(submitted.job.lovart_project_id, "project-from-form");
+  assert.equal(submitted.job.snapshot.lovart_project_id, "project-from-form");
+
+  snapshot.prompt.text = "mutated after submit";
+  await service.setLovartProject({ project_id: "project-changed-later", source: "user_selected" });
+  const [stored] = await service.listPendingJobs();
+  assert.equal(stored.snapshot.prompt.text, "  Use the two references.\n");
+  assert.equal(stored.lovart_project_id, "project-from-form");
 });
 
 test("rejects an unsupported patch path without changing the draft", async (context) => {

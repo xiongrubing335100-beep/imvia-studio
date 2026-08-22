@@ -1,9 +1,38 @@
 ---
 name: imvia-studio
-description: Run IMVIA Studio's fixture-only Milestone 5 mock orchestration, optional Milestone 6 read-only probe, and explicit Milestone 7 Lovart connection/creation flow without exposing credentials or touching the existing Lovart plugin.
+description: Run IMVIA Studio's fixture-only orchestration, independent first-run Lovart credential onboarding, optional read-only probe, and explicitly activated creation flow without exposing credentials or touching the existing Lovart plugin.
 ---
 
 # IMVIA Studio
+
+## Open the web workbench
+
+When the user asks to open, launch, or use IMVIA Studio, call
+`imvia_open_workbench` with `{}`. It returns a local `workbench_url`.
+Immediately call `codex_app__open_in_codex` with
+`{ placement: "right", target: { type: "browser", url: workbench_url } }`.
+This opens the bundled IMVIA Studio workbench in Codex's right-side browser
+panel. Do not ask the user to start a terminal, paste a URL, or run a local
+server command. The page uses the same local IMVIA state and HTTP/SSE service
+as the MCP tools. The original Lovart plugin remains independent.
+
+Keep the current task active after opening the panel. Read the returned
+`submission_cursor`, then call `imvia_wait_for_workbench_submission` with that
+cursor. A timeout means the user has not clicked the workbench submit button
+yet; it is not a failure and must not call Lovart. Continue waiting while the
+current workbench task is active. When the tool returns `submitted: true`,
+read and summarize its immutable `snapshot` as the user's message to Codex,
+then call `imvia_execute_workbench_submission` with that exact `job_id`.
+Never create a second job with `imvia_generate` for the same workbench
+submission.
+
+The workbench button only hands the summarized form to Codex. It never calls
+Lovart directly. Saving a project address only normalizes and remembers it
+locally; project validation, automatic project creation, uploads, and all
+Lovart side effects begin only when Codex executes the received submission.
+The button click is the explicit task-scoped Lovart activation. If execution
+returns a pending cost, stop and ask for the required current-session decision
+under the cost-confirmation rules below.
 
 ## Milestone 5 fixture-only gate
 
@@ -33,6 +62,29 @@ Write fixture status through `imvia_update_job`. Cache only sourced billing mode
 
 On revision/status conflict, unknown response, missing mock adapter, or failed confirmation, stop, re-read local state when safe, and explain the state. Do not skip a state, blindly replay a side effect, connect to real Lovart without the Milestone 7 user action, install a marketplace entry, or advance a fixture job into live execution.
 
+## Lovart activation and provider isolation
+
+Keep Codex's native generation capability and IMVIA/Lovart in separate provider
+contexts. A request may use Lovart only when the user explicitly addresses the
+plugin with `@`, names Lovart or IMVIA Studio, asks to use the Lovart plugin, or
+continues a clearly related active Lovart task with a parent job or artifact.
+Clicking a workbench action such as **发送生成** or **继续编辑** is also an
+explicit Lovart selection. The workbench first sends an immutable summary to
+Codex; Codex then executes that exact job with
+`imvia_execute_workbench_submission`. The activation remains task-scoped and
+is stored as `workbench_action` on that submission.
+
+If the user only asks for a generic image or video, use Codex's native ImageGen
+or video capability. A saved key, a connected status, an active Lovart project,
+or an earlier Lovart request alone never activates Lovart. A continuation is
+valid only with `parent_job_id` or `artifact_id`; ambiguous context uses the
+Codex default capability. Never call both providers for one request.
+
+Never silently fall back between providers: a Lovart failure stays a Lovart
+failure, and a Codex ImageGen failure stays a Codex failure. Never auto-confirm
+costs, change the selected provider, or put AK/SK into activation, prompt,
+project, job, HTTP, or MCP data.
+
 ## Milestone 6 read-only Lovart probe
 
 The user must explicitly request the read-only probe in the current conversation. General permission, a queued job, earlier approval, or a fixture decision is insufficient. Call `imvia_authorize_lovart_probe` before `imvia_probe_lovart_capabilities`.
@@ -45,19 +97,45 @@ Feature disabled, unsupported platform, invalid, expired, or consumed authorizat
 
 The probe is advisory and must not alter job, draft, artifact, cost, iteration, or execution behavior. Never upload, generate, confirm, query projects, threads, status, results, or balance; never expose AK/SK; and never call the existing Lovart plugin.
 
-## Milestone 7 one-click Lovart workflow
+## Independent first-run Lovart onboarding
+
+The first workbench open may start IMVIA credential onboarding when IMVIA
+credentials are missing. This setup uses the bundled signed native helper on
+macOS or Windows; users never need Swift, Xcode, Command Line Tools, a
+PowerShell module, or another developer tool. Credential onboarding never
+activates upload, project creation, generation, confirmation, or cost approval.
+
+IMVIA Studio never reads, migrates, overwrites, or infers credentials or state
+from the existing Lovart plugin. Its macOS namespace is
+`ai.imvia.studio.lovart` / `credentials`; its Windows target is
+`IMVIA.Studio.Lovart`. The workbench status rail shows Lovart only when this
+independent IMVIA connection is established.
+
+## Explicit Lovart workflow
 
 When the user explicitly asks to connect Lovart, call `imvia_connect_lovart` with
 an empty object. The tool opens the native secure dialog; never ask the user to
 paste AK/SK into chat, MCP arguments, environment variables, or a file. The
 result is redacted. `imvia_lovart_status` reads only the redacted local state.
 
-After a connected result, call `imvia_generate` with the user's original
-prompt. It may return `pending_confirmation`; show the amount and unit and
-wait for an explicit current-session acceptance before calling
-`imvia_confirm_generation`. Never auto-confirm, auto-retry a consumed action,
-or expose credential values. The existing Lovart plugin remains independent:
-do not import, execute, configure, reconnect, or modify it.
+The bundled workbench starts onboarding on first open. **重试连接** and
+**更换密钥** reopen the same native secure dialog; the connected-only status
+rail is informational and credentials never enter browser state or HTTP
+arguments. `imvia_disconnect_lovart` is an explicit action that deletes only
+the IMVIA-owned credential item.
+
+After a connected result, resolve the project with
+`imvia_list_lovart_projects`, `imvia_select_lovart_project`, or
+`imvia_create_lovart_project` as needed, then call `imvia_generate` with the
+user's original prompt, an explicit `activation`, and an idempotency key. If no
+project was selected, the first request creates one and later requests reuse
+the active project until the user selects another. It may return
+`pending_confirmation`; show the amount and unit and wait for an explicit
+current-session acceptance before calling `imvia_confirm_generation` with the
+exact job, attempt, fingerprint, and decision. Never auto-confirm, auto-retry
+a consumed action, or expose credential values. The existing Lovart plugin
+remains independent: do not import, execute, configure, reconnect, or modify
+it.
 
 The launcher uses a portable proxy policy: `IMVIA_PROXY_MODE=auto` (the
 default) honors standard proxy variables, then uses the macOS system HTTPS

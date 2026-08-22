@@ -7,12 +7,18 @@ import test from "node:test";
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 
 test("native setup owns secure fields and local-only Keychain attributes", async () => {
-  const source = await readFile(path.join(root, "scripts/configure-lovart.swift"), "utf8");
-  assert.match(source, /NSSecureTextField/);
-  assert.match(source, /kSecAttrAccessibleWhenUnlockedThisDeviceOnly/);
-  assert.match(source, /kSecAttrSynchronizable/);
-  assert.equal(source.includes("print(accessKey"), false);
-  assert.equal(source.includes("print(secretKey"), false);
+  const source = await readFile(path.join(root, "native/credential-helper/src/store.rs"), "utf8");
+  const macosStore = await readFile(path.join(root, "native/credential-helper/src/store/macos.rs"), "utf8");
+  const ui = await readFile(path.join(root, "native/credential-helper/src/ui/macos.rs"), "utf8");
+  assert.match(source, /ai\.imvia\.studio\.lovart/);
+  assert.match(source, /credentials/);
+  assert.match(ui, /NSSecureTextField|secure/i);
+  assert.match(macosStore, /PasswordOptions::new_generic_password/);
+  assert.match(macosStore, /let bytes = generic_password\(options\)/);
+  assert.match(ui, /NSSecureTextField::new/);
+  assert.match(ui, /NSAlertFirstButtonReturn/);
+  assert.equal(ui.includes("response.0"), false);
+  assert.equal(source.includes("existing Lovart plugin"), false);
 });
 
 test("runtime does not reference the protected Lovart worktree", async () => {

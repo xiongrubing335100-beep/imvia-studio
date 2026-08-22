@@ -23,21 +23,19 @@ export function createGenerationService({
     return clientFactory(credentials);
   }
 
-  async function connect() {
-    const connection = await credentialService.connect();
-    if (connection.status !== "connected") return connection;
-    try {
-      const client = await clientForOperation();
-      await client.queryMode();
-      return { ...connection, lovart: { reachable: true } };
-    } catch (error) {
-      const safe = stableError(error);
-      return {
-        status: "not_connected",
-        code: safe.code,
-        message: safe.message,
-      };
-    }
+  async function connect({ onState } = {}) {
+    return credentialService.connect({
+      onState,
+      validate: async (credentials) => {
+        try {
+          await clientFactory(credentials).queryMode();
+          return { accepted: true, code: "CONNECTED" };
+        } catch (error) {
+          const safe = stableError(error);
+          return { accepted: false, code: safe.code, message: safe.message };
+        }
+      },
+    });
   }
 
   async function pollResult(client, threadId, projectId) {
@@ -66,6 +64,15 @@ export function createGenerationService({
     }
   }
 
+  async function resume({ thread_id: threadId, project_id: projectId = null }) {
+    if (typeof threadId !== "string" || !threadId) throw new Error("Lovart thread is required");
+    try {
+      return await pollResult(await clientForOperation(), threadId, projectId);
+    } catch (error) {
+      throw stableError(error);
+    }
+  }
+
   async function confirm(input) {
     let client;
     try {
@@ -77,5 +84,29 @@ export function createGenerationService({
     }
   }
 
-  return Object.freeze({ connect, generate, confirm });
+  async function createProject(input) {
+    try {
+      return await (await clientForOperation()).createProject(input);
+    } catch (error) {
+      throw stableError(error);
+    }
+  }
+
+  async function validateProject(input) {
+    try {
+      return await (await clientForOperation()).validateProject(input);
+    } catch (error) {
+      throw stableError(error);
+    }
+  }
+
+  async function upload(input) {
+    try {
+      return await (await clientForOperation()).upload(input);
+    } catch (error) {
+      throw stableError(error);
+    }
+  }
+
+  return Object.freeze({ connect, generate, resume, confirm, createProject, validateProject, upload });
 }

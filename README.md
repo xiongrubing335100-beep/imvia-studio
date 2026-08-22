@@ -2,8 +2,8 @@
 
 IMVIA Studio is an independent local MCP plugin. Version 0.3.0 keeps the
 Milestone 5 fixture-only orchestration, keeps the optional Milestone 6
-read-only Lovart capability probe, and adds a Milestone 7 no-terminal Lovart
-connection and creation path. The MCP Server ID remains
+read-only Lovart capability probe, and adds a cross-platform first-run Lovart
+connection, project context, creation, and result follow-up path. The MCP Server ID remains
 `imvia-studio`.
 
 The MCP launcher uses a portable proxy policy. By default (`IMVIA_PROXY_MODE=auto`)
@@ -13,10 +13,28 @@ back to a direct connection when neither exists. Nothing is hard-coded or
 persisted. Set `IMVIA_PROXY_MODE=direct` to force direct access, `env` to use
 only standard proxy variables, or `system` to use only the macOS system proxy.
 
+Each MCP process asks the operating system for an available loopback HTTP port,
+so multiple Codex tasks can open independent workbenches at the same time.
+`IMVIA_HTTP_PORT` remains available for deployments that explicitly require a
+fixed local port.
+
 > Installation, dependency installation, and automated tests do not authorize
 > a live Lovart probe or creation. They do not provision credentials, upload,
 > generate, confirm a cost, or contact Lovart. A user must explicitly choose
 > the connection or creation action in the current workbench session.
+
+## Open the bundled workbench
+
+The plugin includes the existing IMVIA Studio web workbench as an independent
+static bundle. When a user asks to open or use IMVIA Studio, call
+`imvia_open_workbench`, then open its returned `workbench_url` in Codex's
+right-side browser panel. The bundled page is served by the same loopback
+service as the MCP and uses the live local adapter (`?imvia=live`). No
+terminal, URL copy/paste, or separate frontend server is required.
+The first open may start independent credential onboarding through a bundled
+signed native helper. The browser receives only redacted state; it never shows
+credential fields. The status rail displays **Lovart 已连接** only after the
+IMVIA-owned connection is established.
 
 ## Architecture and scope
 
@@ -30,9 +48,9 @@ The user-facing Lovart path is separate and starts only from an explicit
 workbench action:
 
 ```text
-imvia_connect_lovart
-  -> native password-style dialog
-  -> IMVIA-owned Keychain item
+first imvia_open_workbench
+  -> native secure dialog (macOS or Windows)
+  -> IMVIA-owned credential store
   -> fixed Lovart mode check
   -> redacted connected/not-connected status
   -> imvia_generate / imvia_confirm_generation when the user asks to create
@@ -73,7 +91,7 @@ identifiers are ignored.
 
 ## Tool inventory
 
-The MCP server exposes exactly 18 tools. The original 12 retain their schemas
+The MCP server exposes 25 tools. The original 12 retain their schemas
 and fixture-only behavior:
 
 - `imvia_claim_cost_decision`
@@ -97,18 +115,43 @@ Milestone 6 adds:
 Milestone 7 adds the no-terminal user flow:
 
 - `imvia_connect_lovart`
+- `imvia_disconnect_lovart`
 - `imvia_lovart_status`
 - `imvia_generate`
 - `imvia_confirm_generation`
+- `imvia_list_lovart_projects`
+- `imvia_select_lovart_project`
+- `imvia_create_lovart_project`
+- `imvia_get_generation`
+- `imvia_follow_up_generation`
+
+The workbench entry point is:
+
+- `imvia_open_workbench`
+
+## Result workspace and text follow-up
+
+The right-side panel keeps its existing empty state until the local state has
+an imported artifact. Once an image, video, or audio artifact is available,
+the panel shows media-specific previews, job status, generation time, and a
+redacted link to the active Lovart project. Selecting a result exposes
+**继续编辑**. Its text instruction is submitted with the selected job and
+artifact lineage through `POST /api/v1/jobs/:jobId/follow-ups` or
+`imvia_follow_up_generation`; the parent project is reused, and an existing
+live parent thread is reused only when its lineage is recorded as IMVIA live.
+The browser receives only a managed local content URL—never local filesystem
+paths, credential fields, or raw Lovart responses. Cost confirmation remains
+explicit and a failed Lovart request never falls back to Codex ImageGen.
 
 ## No-terminal Lovart workflow
 
-In the workbench, call `imvia_connect_lovart` with `{}`. IMVIA opens a native
-macOS password-style dialog; enter the two Lovart keys there and choose
-**Connect**. The values are stored only in the IMVIA-owned Keychain item
-`ai.imvia.studio.lovart` and are never accepted as MCP arguments or returned
-to chat. The result contains only `connected`, `not_connected`, or a stable
-redacted error code.
+On the first workbench open, IMVIA opens the bundled native secure dialog when
+its own credential item is missing. Enter the two Lovart keys there; users do
+not need Swift, Xcode, Command Line Tools, or PowerShell. macOS uses
+`ai.imvia.studio.lovart` / `credentials`; Windows uses
+`IMVIA.Studio.Lovart`. The existing Lovart plugin is never queried or changed.
+`imvia_connect_lovart` remains an explicit retry/replacement action and
+`imvia_disconnect_lovart` deletes only the IMVIA-owned item.
 
 After the result is `connected`, call `imvia_generate` with a prompt. It
 returns completed artifacts, an aborted/timeout status, or
@@ -116,9 +159,9 @@ returns completed artifacts, an aborted/timeout status, or
 `imvia_confirm_generation` until the user explicitly accepts that cost in the
 current conversation. Confirmation is never automatic.
 
-If the connection is already configured, `imvia_lovart_status` reads the
-local redacted status without opening a dialog. The `configure:lovart` script
-is a developer fallback only; ordinary users should not need a terminal.
+If the connection is already configured, `imvia_lovart_status` reads the local
+redacted status without opening a dialog. Ordinary users never need a terminal
+or a developer tool for this flow.
 
 ## Probe setup and feature state
 

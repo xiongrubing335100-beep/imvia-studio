@@ -27,7 +27,7 @@ test("starts the independent imvia-studio MCP and responds to imvia_health", asy
   const listed = await client.listTools();
   assert.deepEqual(
     listed.tools.map((tool) => tool.name).sort(),
-    ["imvia_authorize_lovart_probe", "imvia_claim_cost_decision", "imvia_confirm_generation", "imvia_connect_lovart", "imvia_create_iteration", "imvia_generate", "imvia_get_account_status", "imvia_get_state", "imvia_health", "imvia_import_result", "imvia_list_pending_jobs", "imvia_lovart_status", "imvia_patch_workbench", "imvia_prepare_generation", "imvia_probe_lovart_capabilities", "imvia_record_cost_decision", "imvia_update_account_status", "imvia_update_job"],
+    ["imvia_authorize_lovart_probe", "imvia_claim_cost_decision", "imvia_confirm_generation", "imvia_connect_lovart", "imvia_create_iteration", "imvia_create_lovart_project", "imvia_disconnect_lovart", "imvia_execute_workbench_submission", "imvia_follow_up_generation", "imvia_generate", "imvia_get_account_status", "imvia_get_generation", "imvia_get_state", "imvia_health", "imvia_import_result", "imvia_list_lovart_projects", "imvia_list_pending_jobs", "imvia_lovart_status", "imvia_open_workbench", "imvia_patch_workbench", "imvia_prepare_generation", "imvia_probe_lovart_capabilities", "imvia_record_cost_decision", "imvia_select_lovart_project", "imvia_update_account_status", "imvia_update_job", "imvia_wait_for_workbench_submission"],
   );
 
   const result = await client.callTool({ name: "imvia_health", arguments: {} });
@@ -56,8 +56,48 @@ test("starts the independent imvia-studio MCP and responds to imvia_health", asy
     },
   });
 
+  const opened = await client.callTool({ name: "imvia_open_workbench", arguments: {} });
+  assert.equal(opened.structuredContent.data.mode, "live");
+  assert.equal(opened.structuredContent.data.placement, "right");
+  assert.equal(opened.structuredContent.data.submission_cursor, null);
+  assert.equal(opened.structuredContent.data.onboarding.state, "setup_active");
+  assert.match(opened.structuredContent.data.workbench_url, /^http:\/\/127\.0\.0\.1:\d+\/workbench\?imvia=live$/);
+  assert.equal(new URL(opened.structuredContent.data.workbench_url).searchParams.has("lovart"), false);
+  assert.equal(new URL(opened.structuredContent.data.workbench_url).searchParams.has("code"), false);
+
   await assert.rejects(
     access(path.join(dataDirectory, "lovart-probe-state-v1.json")),
     (error) => error?.code === "ENOENT",
   );
+});
+
+test("starts multiple MCP clients without preconfigured HTTP ports", async (context) => {
+  const dataDirectories = await Promise.all([
+    mkdtemp(path.join(os.tmpdir(), "imvia-mcp-multi-a-")),
+    mkdtemp(path.join(os.tmpdir(), "imvia-mcp-multi-b-")),
+  ]);
+  const clients = dataDirectories.map((_, index) => new Client({
+    name: `imvia-studio-multi-client-${index + 1}`,
+    version: "0.3.0",
+  }));
+  context.after(async () => {
+    await Promise.allSettled(clients.map((client) => client.close()));
+    await Promise.all(dataDirectories.map((dataDirectory) => rm(dataDirectory, { recursive: true, force: true })));
+  });
+
+  await Promise.all(clients.map((client, index) => {
+    const env = { ...process.env, IMVIA_DATA_DIR: dataDirectories[index] };
+    delete env.IMVIA_HTTP_PORT;
+    return client.connect(new StdioClientTransport({
+      command: process.execPath,
+      args: [path.join(pluginRoot, "src/index.js")],
+      cwd: pluginRoot,
+      env,
+    }));
+  }));
+
+  const health = await Promise.all(clients.map((client) => client.callTool({ name: "imvia_health", arguments: {} })));
+  const ports = health.map((result) => result.structuredContent.data.http_service.port);
+  assert.ok(ports.every((port) => Number.isInteger(port) && port > 0));
+  assert.notEqual(ports[0], ports[1]);
 });
