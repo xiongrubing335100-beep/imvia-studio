@@ -34,6 +34,12 @@ All focused suites pass. The complete Node suite has one pre-existing
 environmental exception: the protected Lovart workspace is already dirty with
 untracked files outside this repository. It was not modified or reset.
 
+The final local run recorded 341 tests: 340 passed and 1 failed only at
+`test/protected-paths.test.mjs` because that external protected workspace does
+not match the recorded baseline. The loopback HTTP/MCP suites were rerun
+outside the restricted sandbox and passed all 33 tests. Plugin validation also
+passed.
+
 ## Native build limitation
 
 The current development environment has no `cargo` or `rustc`. Attempts to
