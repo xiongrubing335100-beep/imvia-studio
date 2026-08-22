@@ -16,7 +16,13 @@ test("native setup owns secure fields and local-only Keychain attributes", async
   assert.match(macosStore, /PasswordOptions::new_generic_password/);
   assert.match(macosStore, /let bytes = generic_password\(options\)/);
   assert.match(ui, /NSSecureTextField::new/);
+  assert.match(ui, /access\.setEditable\(true\)/);
+  assert.match(ui, /access\.setSelectable\(true\)/);
+  assert.match(ui, /secret\.setEditable\(true\)/);
+  assert.match(ui, /secret\.setSelectable\(true\)/);
   assert.match(ui, /NSAlertFirstButtonReturn/);
+  assert.match(macosStore, /ItemSearchOptions::new/);
+  assert.match(macosStore, /skip_authenticated_items\(true\)/);
   assert.equal(ui.includes("response.0"), false);
   assert.equal(source.includes("existing Lovart plugin"), false);
 });

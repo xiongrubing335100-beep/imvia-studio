@@ -1,3 +1,4 @@
+use security_framework::item::{ItemClass, ItemSearchOptions};
 use security_framework::passwords::{delete_generic_password, generic_password, set_generic_password, PasswordOptions};
 use zeroize::Zeroizing;
 
@@ -17,7 +18,24 @@ fn map_error(error: impl std::fmt::Display) -> HelperError {
 
 impl CredentialStore for MacCredentialStore {
     fn status(&self) -> StoreStatus {
-        match self.read() { Ok(_) => StoreStatus::Connected, Err(_) => StoreStatus::SetupRequired }
+        // Status is queried while the workbench is opening.  A regular data
+        // read can make macOS show a Keychain authorization sheet before the
+        // user has even seen the setup form (especially for an unsigned
+        // personal build).  Search only for the IMVIA-owned item and skip
+        // entries that require interactive authentication; the actual read is
+        // still performed for authenticated Lovart operations.
+        let mut options = ItemSearchOptions::new();
+        options
+            .class(ItemClass::generic_password())
+            .service(MACOS_SERVICE)
+            .account(MACOS_ACCOUNT)
+            .limit(1)
+            .load_data(false)
+            .skip_authenticated_items(true);
+        match options.search() {
+            Ok(items) if !items.is_empty() => StoreStatus::Connected,
+            _ => StoreStatus::SetupRequired,
+        }
     }
 
     fn read(&self) -> Result<CredentialPair, HelperError> {

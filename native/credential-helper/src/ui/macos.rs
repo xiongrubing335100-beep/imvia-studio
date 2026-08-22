@@ -27,9 +27,15 @@ fn macos_prompt() -> Result<PromptOutcome, HelperError> {
     app.activateIgnoringOtherApps(true);
 
     let access = NSTextField::textFieldWithString(ns_string!(""), mtm);
+    access.setEditable(true);
+    access.setSelectable(true);
+    access.setAllowsEditingTextAttributes(false);
     access.setPlaceholderString(Some(ns_string!("Access Key")));
     access.setFrame(NSRect::new(NSPoint::new(0.0, 55.0), NSSize::new(320.0, 28.0)));
     let secret = NSSecureTextField::new(mtm);
+    secret.setEditable(true);
+    secret.setSelectable(true);
+    secret.setAllowsEditingTextAttributes(false);
     secret.setStringValue(ns_string!(""));
     secret.setPlaceholderString(Some(ns_string!("Secret Key")));
     secret.setFrame(NSRect::new(NSPoint::new(0.0, 15.0), NSSize::new(320.0, 28.0)));
@@ -40,7 +46,7 @@ fn macos_prompt() -> Result<PromptOutcome, HelperError> {
 
     let alert = NSAlert::new(mtm);
     alert.setMessageText(ns_string!("连接 Lovart"));
-    alert.setInformativeText(ns_string!("密钥仅保存到 IMVIA Studio 的系统凭据存储。"));
+    alert.setInformativeText(ns_string!("密钥仅保存到 IMVIA Studio 的系统凭据存储。可直接粘贴；首次保存时 macOS 可能要求输入登录钥匙串密码，请选择“始终允许”。"));
     alert.setAccessoryView(Some(&fields));
     alert.addButtonWithTitle(ns_string!("连接"));
     alert.addButtonWithTitle(ns_string!("取消"));
