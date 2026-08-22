@@ -17,7 +17,11 @@ function args(argv) {
   const result = {};
   for (let i = 0; i < argv.length; i += 1) {
     const key = argv[i];
-    if (!key.startsWith("--") || !argv[i + 1]) fail("ASSEMBLY_INVALID", `Missing value for ${key}`);
+    if (key === "--allow-unsigned") {
+      result["allow-unsigned"] = true;
+      continue;
+    }
+    if (!key.startsWith("--") || !argv[i + 1] || argv[i + 1].startsWith("--")) fail("ASSEMBLY_INVALID", `Missing value for ${key}`);
     result[key.slice(2)] = argv[++i];
   }
   return result;
@@ -25,7 +29,7 @@ function args(argv) {
 
 async function digest(file) { return createHash("sha256").update(await readFile(file)).digest("hex"); }
 
-export async function assembleCredentialHelpers({ output, artifacts }) {
+export async function assembleCredentialHelpers({ output, artifacts, allowUnsigned = false }) {
   if (!output || !artifacts || Object.keys(artifacts).sort().join(",") !== Object.keys(TARGETS).sort().join(",")) fail("ASSEMBLY_INVALID");
   const root = path.resolve(output);
   const helpers = {};
@@ -36,13 +40,15 @@ export async function assembleCredentialHelpers({ output, artifacts }) {
     try { info = await lstat(source); } catch { fail("HELPER_NOT_PACKAGED"); }
     if (!info.isFile() || info.isSymbolicLink()) fail("UPSTREAM_SECURITY_REJECTED");
     if (target.startsWith("darwin-") && (info.mode & 0o111) === 0) fail("UPSTREAM_SECURITY_REJECTED");
-    const signatureFile = path.join(artifactRoot, "signature.json");
-    try {
-      const signature = JSON.parse(await readFile(signatureFile, "utf8"));
-      if (signature.signed !== true || signature.target !== target) fail("UPSTREAM_SECURITY_REJECTED");
-    } catch (error) {
-      if (error.code) throw error;
-      fail("UPSTREAM_SECURITY_REJECTED");
+    if (!allowUnsigned) {
+      const signatureFile = path.join(artifactRoot, "signature.json");
+      try {
+        const signature = JSON.parse(await readFile(signatureFile, "utf8"));
+        if (signature.signed !== true || signature.target !== target) fail("UPSTREAM_SECURITY_REJECTED");
+      } catch (error) {
+        if (error.code) throw error;
+        fail("UPSTREAM_SECURITY_REJECTED");
+      }
     }
     const destination = path.join(root, "native", target, filename);
     await mkdir(path.dirname(destination), { recursive: true, mode: 0o755 });
@@ -62,7 +68,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToP
     if (!input[target]) fail("ASSEMBLY_INVALID", `Missing --${target}`);
     return [target, input[target]];
   }));
-  assembleCredentialHelpers({ output, artifacts }).then(() => process.stdout.write("credential helpers assembled\n"), (error) => {
+  assembleCredentialHelpers({ output, artifacts, allowUnsigned: input["allow-unsigned"] === true }).then(() => process.stdout.write("credential helpers assembled\n"), (error) => {
     process.stderr.write(`${error.code || "ASSEMBLY_FAILED"}\n`);
     process.exitCode = 1;
   });
