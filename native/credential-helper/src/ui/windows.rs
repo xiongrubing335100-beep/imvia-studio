@@ -2,10 +2,12 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{GetLastError, HWND};
 use windows_sys::Win32::Security::Credentials::{
-    CredUIPromptForWindowsCredentialsW, CredUnPackAuthenticationBufferW, CREDUI_INFO,
+    CredUIPromptForWindowsCredentialsW, CredUnPackAuthenticationBufferW, CREDUI_INFOW,
     CREDUIWIN_GENERIC,
 };
-use windows_sys::Win32::System::Memory::{CoTaskMemFree, SecureZeroMemory};
+use windows_sys::Win32::System::Com::CoTaskMemFree;
+
+use zeroize::Zeroize;
 
 use crate::protocol::{CredentialPair, HelperError};
 use crate::ui::{CredentialPrompt, PromptOutcome};
@@ -19,12 +21,12 @@ impl CredentialPrompt for WindowsCredentialPrompt {
         let mut buffer_size = 0u32;
         let mut save = 0i32;
         let caption = wide("连接 Lovart");
-        let info = CREDUI_INFO {
-            cbSize: std::mem::size_of::<CREDUI_INFO>() as u32,
+        let info = CREDUI_INFOW {
+            cbSize: std::mem::size_of::<CREDUI_INFOW>() as u32,
             hwndParent: 0 as HWND,
             pszMessageText: caption.as_ptr(),
             pszCaptionText: caption.as_ptr(),
-            hbmBanner: 0,
+            hbmBanner: null_mut(),
         };
         let result = unsafe {
             CredUIPromptForWindowsCredentialsW(
@@ -61,7 +63,7 @@ impl CredentialPrompt for WindowsCredentialPrompt {
             )
         };
         unsafe {
-            SecureZeroMemory(buffer as *mut _, buffer_size as usize);
+            std::slice::from_raw_parts_mut(buffer as *mut u8, buffer_size as usize).zeroize();
             CoTaskMemFree(buffer as *const _);
         }
         if unpacked == 0 { return Err(HelperError::new("CREDENTIAL_SETUP_INVALID")); }

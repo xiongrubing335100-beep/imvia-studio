@@ -59,7 +59,10 @@ impl ResultMessage {
     pub fn setup_required(code: &str) -> Self { Self::new("setup_required", Some(code.to_owned())) }
 
     pub fn with_credentials(pair: CredentialPair) -> Self {
-        let wire = CredentialWire { access_key: pair.access_key, secret_key: pair.secret_key };
+        let wire = CredentialWire {
+            access_key: pair.access_key.clone(),
+            secret_key: pair.secret_key.clone(),
+        };
         let mut result = Self::new("connected", Some("CONNECTED".to_owned()));
         result.credentials = Some(wire);
         result
