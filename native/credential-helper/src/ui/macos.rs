@@ -15,7 +15,7 @@ impl CredentialPrompt for MacCredentialPrompt {
         // The AppKit prompt is hosted by the signed helper process. Keeping the
         // adapter boundary here prevents credentials from entering Node or the
         // browser and makes cancellation a first-class result.
-        super::macos_prompt()
+        macos_prompt()
     }
 }
 
