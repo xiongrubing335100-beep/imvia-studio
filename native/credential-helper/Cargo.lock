@@ -7,7 +7,6 @@ version = "1.0.0"
 dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
- "security-framework",
  "serde",
  "serde_json",
  "windows-sys",

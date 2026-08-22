@@ -46,7 +46,7 @@ fn macos_prompt() -> Result<PromptOutcome, HelperError> {
 
     let alert = NSAlert::new(mtm);
     alert.setMessageText(ns_string!("连接 Lovart"));
-    alert.setInformativeText(ns_string!("密钥仅保存到 IMVIA Studio 的系统凭据存储。可直接粘贴；首次保存时 macOS 可能要求输入登录钥匙串密码，请选择“始终允许”。"));
+    alert.setInformativeText(ns_string!("密钥仅保存到本机的 IMVIA Studio 私有文件，不使用 macOS 钥匙串。可直接粘贴；保存后下次打开无需重复填写。"));
     alert.setAccessoryView(Some(&fields));
     alert.addButtonWithTitle(ns_string!("连接"));
     alert.addButtonWithTitle(ns_string!("取消"));
