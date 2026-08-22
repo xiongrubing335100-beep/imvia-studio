@@ -55,3 +55,7 @@ helpers, assemble `native/manifest.json`, and run
   session. The status rail is connected-only.
 - No code reads, migrates, overwrites, or infers the existing Lovart plugin's
   namespace or state.
+- Marketplace `personal` now records `imvia-studio.policy.authentication` as
+  `ON_INSTALL`; the update was applied through the validated policy command.
+- Plugin validation passed with the bundled Python runtime. The cachebuster was
+  refreshed to `0.3.0+codex.20260822065433`.
