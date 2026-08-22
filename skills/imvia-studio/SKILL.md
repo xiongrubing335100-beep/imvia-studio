@@ -1,6 +1,6 @@
 ---
 name: imvia-studio
-description: Run IMVIA Studio's fixture-only Milestone 5 mock orchestration, optional Milestone 6 read-only probe, and explicitly activated Lovart creation flow without exposing credentials or touching the existing Lovart plugin.
+description: Run IMVIA Studio's fixture-only orchestration, independent first-run Lovart credential onboarding, optional read-only probe, and explicitly activated creation flow without exposing credentials or touching the existing Lovart plugin.
 ---
 
 # IMVIA Studio
@@ -97,16 +97,32 @@ Feature disabled, unsupported platform, invalid, expired, or consumed authorizat
 
 The probe is advisory and must not alter job, draft, artifact, cost, iteration, or execution behavior. Never upload, generate, confirm, query projects, threads, status, results, or balance; never expose AK/SK; and never call the existing Lovart plugin.
 
-## Milestone 7 one-click Lovart workflow
+## Independent first-run Lovart onboarding
+
+The first workbench open may start IMVIA credential onboarding when IMVIA
+credentials are missing. This setup uses the bundled signed native helper on
+macOS or Windows; users never need Swift, Xcode, Command Line Tools, a
+PowerShell module, or another developer tool. Credential onboarding never
+activates upload, project creation, generation, confirmation, or cost approval.
+
+IMVIA Studio never reads, migrates, overwrites, or infers credentials or state
+from the existing Lovart plugin. Its macOS namespace is
+`ai.imvia.studio.lovart` / `credentials`; its Windows target is
+`IMVIA.Studio.Lovart`. The workbench status rail shows Lovart only when this
+independent IMVIA connection is established.
+
+## Explicit Lovart workflow
 
 When the user explicitly asks to connect Lovart, call `imvia_connect_lovart` with
 an empty object. The tool opens the native secure dialog; never ask the user to
 paste AK/SK into chat, MCP arguments, environment variables, or a file. The
 result is redacted. `imvia_lovart_status` reads only the redacted local state.
 
-The bundled workbench also exposes **连接 Lovart**. It uses the same local
-native dialog and returns only the redacted status; credentials never enter
-browser state or HTTP arguments.
+The bundled workbench starts onboarding on first open. **重试连接** and
+**更换密钥** reopen the same native secure dialog; the connected-only status
+rail is informational and credentials never enter browser state or HTTP
+arguments. `imvia_disconnect_lovart` is an explicit action that deletes only
+the IMVIA-owned credential item.
 
 After a connected result, resolve the project with
 `imvia_list_lovart_projects`, `imvia_select_lovart_project`, or

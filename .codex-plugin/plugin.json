@@ -1,15 +1,15 @@
 {
   "name": "imvia-studio",
   "version": "0.3.0+codex.20260821172904",
-  "description": "Independent local IMVIA Studio MCP with one-click Lovart connection and explicit creation controls.",
+  "description": "Independent local IMVIA Studio MCP with first-run cross-platform Lovart onboarding and explicit creation controls.",
   "author": {
     "name": "IMVIA Studio"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "IMVIA Studio",
-    "shortDescription": "Local workbench with one-click Lovart connection.",
-    "longDescription": "IMVIA Studio provides isolated local MCP, JSON state, task lifecycle, managed result import, loopback HTTP/SSE services, a secure no-terminal Lovart connection flow, and explicit creation/cost confirmation controls. The existing Lovart plugin remains independent.",
+    "shortDescription": "Local workbench with independent Lovart onboarding.",
+    "longDescription": "IMVIA Studio provides isolated local MCP, JSON state, task lifecycle, managed result import, loopback HTTP/SSE services, a bundled cross-platform secure Lovart onboarding flow, and explicit creation/cost confirmation controls. The existing Lovart plugin remains independent.",
     "developerName": "IMVIA Studio",
     "category": "Creativity",
     "capabilities": [

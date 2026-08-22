@@ -33,6 +33,25 @@ test("loopback HTTP server reads and revision-patches the same local workbench s
   assert.equal((await conflict.json()).error.code, "REVISION_CONFLICT");
 });
 
+test("multiple loopback HTTP servers receive distinct default ports", async (context) => {
+  const dataDirectories = await Promise.all([
+    mkdtemp(path.join(os.tmpdir(), "imvia-http-multi-a-")),
+    mkdtemp(path.join(os.tmpdir(), "imvia-http-multi-b-")),
+  ]);
+  const servers = [];
+  context.after(async () => {
+    await Promise.allSettled(servers.map((server) => server.close()));
+    await Promise.all(dataDirectories.map((dataDirectory) => rm(dataDirectory, { recursive: true, force: true })));
+  });
+
+  servers.push(await startHttpServer({ dataDirectory: dataDirectories[0] }));
+  servers.push(await startHttpServer({ dataDirectory: dataDirectories[1] }));
+
+  const ports = servers.map((server) => Number.parseInt(new URL(server.url).port, 10));
+  assert.ok(ports.every((port) => Number.isInteger(port) && port > 0));
+  assert.notEqual(ports[0], ports[1]);
+});
+
 test("loopback HTTP server serves the bundled live IMVIA Studio workbench", async (context) => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-workbench-ui-"));
   const server = await startHttpServer({ dataDirectory, port: 0 });
@@ -56,7 +75,7 @@ test("loopback HTTP server serves the bundled live IMVIA Studio workbench", asyn
   assert.ok(bridgePath);
   const bridge = await fetch(`${server.url}${bridgePath}`);
   assert.equal(bridge.status, 200);
-  assert.match(await bridge.text(), /\/workbench\/lovart\/connect/);
+  assert.match(await bridge.text(), /\/api\/v1\/lovart\/connect/);
 
   const root = await fetch(server.url, { redirect: "manual" });
   assert.equal(root.status, 302);
@@ -108,16 +127,14 @@ test("workbench connects through form navigation when page request APIs are unav
 
   const page = await fetch(server.workbenchUrl).then((response) => response.text());
   const bridgePath = [...page.matchAll(/src="([^"]+\.js)"/g)].map((match) => match[1]).find((value) => value.includes("imvia-lovart-bridge"));
-  assert.equal(bridgePath, "/assets/imvia-lovart-bridge-v2.js");
   const bridgeSource = await fetch(`${server.url}${bridgePath}`).then((response) => response.text());
-  assert.match(bridgeSource, /method="post"/i);
-  assert.match(bridgeSource, /action="\/workbench\/lovart\/connect"/);
-  assert.equal(/\bfetch\s*\(/.test(bridgeSource), false);
-  assert.equal(/XMLHttpRequest/.test(bridgeSource), false);
+  assert.equal(bridgePath, "/assets/imvia-lovart-bridge-v3.js");
+  assert.match(bridgeSource, /\/api\/v1\/lovart\/connect/);
+  assert.match(bridgeSource, /EventSource\("\/api\/v1\/events"\)/);
 
   const connected = await fetch(`${server.url}/workbench/lovart/connect`, { method: "POST", redirect: "manual" });
   assert.equal(connected.status, 303);
-  assert.equal(connected.headers.get("location"), "/workbench?imvia=live&lovart=connected");
+  assert.equal(connected.headers.get("location"), "/workbench?imvia=live");
   assert.deepEqual(calls, ["connect"]);
 });
 

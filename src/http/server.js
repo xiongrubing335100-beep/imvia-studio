@@ -54,8 +54,9 @@ function send(response, status, payload) { response.writeHead(status, { "content
 function envelope(data) { return { api_version: "1", ok: true, data }; }
 function errorPayload(error) { const known = error instanceof DomainError; return { api_version: "1", ok: false, error: { code: known ? error.code : "STORE_UNAVAILABLE", message: known ? error.message : "Local workbench service is unavailable.", retryable: known && ["REVISION_CONFLICT", "STATUS_CONFLICT"].includes(error.code), details: known ? error.details : {} } }; }
 function redactedConnection(value) {
-  const connected = value?.status === "connected";
+  const connected = value?.status === "connected" || value?.state === "connected";
   const code = typeof value?.code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(value.code) ? value.code : null;
+  if (value?.state) return { state: connected ? "connected" : value.state, ...(code ? { code } : {}), ...(value.checked_at ? { checked_at: value.checked_at } : {}) };
   return { status: connected ? "connected" : "not_connected", ...(code ? { code } : {}) };
 }
 function redactArtifact(artifact) {
@@ -88,10 +89,8 @@ function redactOrchestratorResult(result) {
     ...(result.results ? { results: result.results.map((item) => item?.artifact ? { ...item, artifact: redactArtifact(item.artifact) } : item) } : {}),
   };
 }
-function redirectToWorkbench(response, connection) {
-  const query = new URLSearchParams({ imvia: "live", lovart: connection.status });
-  if (connection.code) query.set("code", connection.code);
-  response.writeHead(303, { location: `/workbench?${query}`, "cache-control": "no-store" });
+function redirectToWorkbench(response) {
+  response.writeHead(303, { location: "/workbench?imvia=live", "cache-control": "no-store" });
   response.end();
 }
 
@@ -130,7 +129,7 @@ function errorStatus(error) {
   return 400;
 }
 
-export async function startHttpServer({ dataDirectory, service: providedService, projectContextService = null, orchestrator = null, port = 4190, workbenchDirectory = DEFAULT_WORKBENCH_DIRECTORY, lovartConnection = null } = {}) {
+export async function startHttpServer({ dataDirectory, service: providedService, projectContextService = null, orchestrator = null, port = 0, workbenchDirectory = DEFAULT_WORKBENCH_DIRECTORY, lovartConnection = null } = {}) {
   const service = providedService || createWorkbenchService({ dataDirectory });
   const eventClients = new Set();
   let eventId = 0;
@@ -140,6 +139,9 @@ export async function startHttpServer({ dataDirectory, service: providedService,
     for (const client of eventClients) client.write(message);
   };
   const unsubscribe = service.subscribe((event) => publish(event.type, event.data));
+  const unsubscribeLovart = typeof lovartConnection?.subscribe === "function"
+    ? lovartConnection.subscribe((event) => publish(event.type, event.data))
+    : () => {};
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url, "http://127.0.0.1");
@@ -149,24 +151,25 @@ export async function startHttpServer({ dataDirectory, service: providedService,
         return;
       }
       if (request.method === "GET" && url.pathname === "/workbench/bootstrap.js") {
-        let connection = { status: "not_connected", code: "CONNECTION_UNAVAILABLE" };
+        let connection = { state: "setup_required", code: "SETUP_REQUIRED" };
         if (typeof lovartConnection?.status === "function") {
-          try { connection = redactedConnection(await lovartConnection.status()); } catch { connection = { status: "not_connected", code: "CONNECTION_UNAVAILABLE" }; }
+          try { connection = redactedConnection(await lovartConnection.status()); } catch { connection = { state: "failed", code: "HELPER_NOT_PACKAGED" }; }
         }
         response.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
         response.end(`window.__IMVIA_LOVART_STATUS__=${JSON.stringify(connection)};`);
         return;
       }
       if (request.method === "POST" && url.pathname === "/workbench/lovart/connect") {
-        if (typeof lovartConnection?.connect !== "function") return redirectToWorkbench(response, { status: "not_connected", code: "CONNECTION_UNAVAILABLE" });
-        try { return redirectToWorkbench(response, redactedConnection(await lovartConnection.connect())); }
-        catch { return redirectToWorkbench(response, { status: "not_connected", code: "UPSTREAM_UNAVAILABLE" }); }
+        if (typeof lovartConnection?.retry !== "function" && typeof lovartConnection?.connect !== "function") return redirectToWorkbench(response);
+        try { await (lovartConnection.retry?.() || lovartConnection.connect()); }
+        catch { /* the onboarding surface receives a redacted failure event */ }
+        return redirectToWorkbench(response);
       }
       if (request.method === "GET" && await serveWorkbench(response, url.pathname, workbenchDirectory)) return;
       if (request.method === "GET" && url.pathname === "/api/v1/health") return send(response, 200, envelope({ status: "ok", bind: "127.0.0.1" }));
       if (request.method === "GET" && url.pathname === "/api/v1/lovart/status") {
         if (typeof lovartConnection?.status !== "function") return send(response, 503, { api_version: "1", ok: false, error: { code: "CONNECTION_UNAVAILABLE", message: "Lovart connection service is unavailable.", retryable: true, details: {} } });
-        return send(response, 200, envelope(await lovartConnection.status()));
+        return send(response, 200, envelope(redactedConnection(await lovartConnection.status())));
       }
       if (request.method === "GET" && url.pathname === "/api/v1/lovart/projects") {
         if (!projectContextService?.list) throw new DomainError("CONTEXT_UNAVAILABLE", "Lovart project context service is unavailable.");
@@ -185,8 +188,13 @@ export async function startHttpServer({ dataDirectory, service: providedService,
         return send(response, 200, envelope(await projectContextService.create(await body(request))));
       }
       if (request.method === "POST" && url.pathname === "/api/v1/lovart/connect") {
-        if (typeof lovartConnection?.connect !== "function") return send(response, 503, { api_version: "1", ok: false, error: { code: "CONNECTION_UNAVAILABLE", message: "Lovart connection service is unavailable.", retryable: true, details: {} } });
-        return send(response, 200, envelope(await lovartConnection.connect()));
+        const action = lovartConnection?.retry || lovartConnection?.connect;
+        if (typeof action !== "function") return send(response, 503, { api_version: "1", ok: false, error: { code: "CONNECTION_UNAVAILABLE", message: "Lovart connection service is unavailable.", retryable: true, details: {} } });
+        return send(response, 200, envelope(redactedConnection(await action.call(lovartConnection))));
+      }
+      if (request.method === "POST" && url.pathname === "/api/v1/lovart/disconnect") {
+        if (typeof lovartConnection?.disconnect !== "function") return send(response, 503, { api_version: "1", ok: false, error: { code: "CONNECTION_UNAVAILABLE", message: "Lovart connection service is unavailable.", retryable: true, details: {} } });
+        return send(response, 200, envelope(redactedConnection(await lovartConnection.disconnect())));
       }
       if (request.method === "POST" && url.pathname === "/api/v1/generations") {
         if (!orchestrator?.submit) throw new DomainError("CONTEXT_UNAVAILABLE", "Lovart generation orchestrator is unavailable.");
@@ -290,5 +298,5 @@ export async function startHttpServer({ dataDirectory, service: providedService,
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen({ host: "127.0.0.1", port }, resolve); });
   const address = server.address();
   const url = `http://127.0.0.1:${address.port}`;
-  return { host: "127.0.0.1", url, workbenchUrl: `${url}/workbench?imvia=live`, close: () => new Promise((resolve, reject) => { unsubscribe(); for (const client of eventClients) client.end(); server.close((error) => error ? reject(error) : resolve()); }) };
+  return { host: "127.0.0.1", url, workbenchUrl: `${url}/workbench?imvia=live`, close: () => new Promise((resolve, reject) => { unsubscribe(); unsubscribeLovart(); for (const client of eventClients) client.end(); server.close((error) => error ? reject(error) : resolve()); }) };
 }

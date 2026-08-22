@@ -11,6 +11,7 @@ import { createLovartProbeService } from "./probe/probe-service.js";
 import { createProbeStore } from "./probe/probe-store.js";
 import { createCredentialService } from "./lovart/credentials.js";
 import { createGenerationService } from "./lovart/generation-service.js";
+import { createOnboardingService } from "./lovart/onboarding-service.js";
 import { createProjectContextService } from "./lovart/project-context-service.js";
 import { createArtifactTransfer } from "./lovart/artifact-transfer.js";
 import { createGenerationOrchestrator } from "./lovart/generation-orchestrator.js";
@@ -19,7 +20,7 @@ import { fileURLToPath } from "node:url";
 
 const PLUGIN_VERSION = "0.3.0";
 const SCHEMA_VERSION = "1";
-const DEFAULT_HTTP_PORT = 4190;
+const DEFAULT_HTTP_PORT = 0;
 const WORKBENCH_DIRECTORY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../workbench/dist");
 const authorizeProbeInput = z.object({
   source: z.literal("user:current_session"),
@@ -101,10 +102,17 @@ function domainResponse(action) {
 
 const LOVART_ERROR_CODES = new Set([
   "AUTHENTICATION_FAILED",
+  "CONNECTED",
   "CREDENTIAL_REFERENCE_UNAVAILABLE",
+  "CREDENTIAL_STORE_DENIED",
   "CREDENTIAL_SETUP_CANCELLED",
   "CREDENTIAL_SETUP_FAILED",
   "CREDENTIAL_SETUP_INVALID",
+  "HELPER_NOT_PACKAGED",
+  "HELPER_LAUNCH_FAILED",
+  "SETUP_CANCELLED",
+  "SETUP_INVALID",
+  "SETUP_REQUIRED",
   "PLATFORM_UNSUPPORTED",
   "UPSTREAM_RATE_LIMITED",
   "UPSTREAM_SCHEMA_UNRECOGNIZED",
@@ -150,6 +158,7 @@ export function createServer({
   probeService: providedProbeService,
   credentialService: providedCredentialService,
   generationService: providedGenerationService,
+  onboardingService: providedOnboardingService,
   projectContextService: providedProjectContextService,
   orchestrator: providedOrchestrator,
   artifactTransfer: providedArtifactTransfer,
@@ -162,6 +171,10 @@ export function createServer({
   const probeService = providedProbeService ?? createProductionProbeService(stateDirectory);
   const credentialService = providedCredentialService ?? createCredentialService();
   const generationService = providedGenerationService ?? createGenerationService({ credentialService });
+  const onboardingService = providedOnboardingService ?? createOnboardingService({
+    credentialService,
+    connect: ({ onState }) => generationService.connect({ onState }),
+  });
   const projectContextService = providedProjectContextService ?? (
     service?.getLovartProjects && generationService?.validateProject && generationService?.createProject
       ? createProjectContextService({ workbenchService: service, generationService })
@@ -189,6 +202,7 @@ export function createServer({
     },
     async () => {
       const workbenchUrl = httpService?.workbench_url || httpService?.workbenchUrl || `http://127.0.0.1:${httpService?.port ?? configuredPort()}/workbench?imvia=live`;
+      const onboarding = typeof onboardingService?.ensureStarted === "function" ? await onboardingService.ensureStarted() : null;
       let submissionCursor = null;
       if (typeof service?.getState === "function") {
         const state = await service.getState({ include: ["jobs"] });
@@ -197,7 +211,7 @@ export function createServer({
       return toMcpResponse({
         api_version: "1",
         ok: true,
-        data: { workbench_url: workbenchUrl, placement: "right", mode: "live", submission_cursor: submissionCursor },
+        data: { workbench_url: workbenchUrl, placement: "right", mode: "live", submission_cursor: submissionCursor, ...(onboarding ? { onboarding } : {}) },
       });
     },
   );
@@ -243,7 +257,11 @@ export function createServer({
   server.registerTool("imvia_connect_lovart", {
     description: "Open the secure native Lovart connection dialog and validate the connection. Keys never enter MCP arguments or results.",
     inputSchema: z.object({}).strict(),
-  }, lovartResponse(() => generationService.connect()));
+  }, lovartResponse(() => (typeof onboardingService?.retry === "function" ? onboardingService.retry() : generationService.connect())));
+  server.registerTool("imvia_disconnect_lovart", {
+    description: "Explicitly disconnect the independent IMVIA Lovart credential. This deletes only the IMVIA-owned credential item.",
+    inputSchema: z.object({}).strict(),
+  }, lovartResponse(() => onboardingService.disconnect()));
   server.registerTool("imvia_lovart_status", {
     description: "Read the redacted local Lovart connection status without opening a dialog or returning credentials.",
     inputSchema: z.object({}).strict(),
@@ -435,6 +453,10 @@ export async function startServer() {
   const probeService = createProductionProbeService(stateDirectory);
   const credentialService = createCredentialService();
   const generationService = createGenerationService({ credentialService });
+  const onboardingService = createOnboardingService({
+    credentialService,
+    connect: ({ onState }) => generationService.connect({ onState }),
+  });
   const projectContextService = createProjectContextService({ workbenchService: service, generationService });
   const artifactTransfer = createArtifactTransfer({ dataDirectory: stateDirectory, workspaceDirectory: WORKBENCH_DIRECTORY });
   const orchestrator = createGenerationOrchestrator({ projectContextService, workbenchService: service, generationService, artifactTransfer });
@@ -444,13 +466,10 @@ export async function startServer() {
     projectContextService,
     orchestrator,
     port: configuredPort(),
-    lovartConnection: {
-      connect: () => generationService.connect(),
-      status: () => credentialService.status(),
-    },
+    lovartConnection: onboardingService,
   });
   const httpService = { port: Number.parseInt(new URL(http.url).port, 10), url: http.url, workbench_url: http.workbenchUrl };
-  const server = createServer({ service, probeService, credentialService, generationService, projectContextService, artifactTransfer, orchestrator, httpService, dataDirectory: stateDirectory });
+  const server = createServer({ service, probeService, credentialService, generationService, onboardingService, projectContextService, artifactTransfer, orchestrator, httpService, dataDirectory: stateDirectory });
   const closeHttp = () => http.close().catch(() => undefined);
   process.stdin.once("end", closeHttp);
   process.once("SIGINT", closeHttp);

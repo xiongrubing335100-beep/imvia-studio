@@ -46,7 +46,7 @@ test("connection and status return redacted status envelopes", async (context) =
   assert.deepEqual(connected.structuredContent, {
     api_version: "1",
     ok: true,
-    data: { status: "connected", checked_at: "2026-08-21T00:00:00.000Z", lovart: { reachable: true } },
+    data: { state: "connected", code: "CONNECTED", checked_at: "2026-08-21T00:00:00.000Z" },
   });
   const status = await client.callTool({ name: "imvia_lovart_status", arguments: {} });
   assert.deepEqual(status.structuredContent.data, { status: "connected", checked_at: "2026-08-21T00:00:00.000Z" });

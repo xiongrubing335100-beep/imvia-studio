@@ -31,7 +31,7 @@ test("MCP reads, patches, prepares, and lists only its local workbench state", a
   const tools = await client.listTools();
   assert.deepEqual(
     tools.tools.map((tool) => tool.name).sort(),
-    ["imvia_authorize_lovart_probe", "imvia_claim_cost_decision", "imvia_confirm_generation", "imvia_connect_lovart", "imvia_create_iteration", "imvia_create_lovart_project", "imvia_execute_workbench_submission", "imvia_follow_up_generation", "imvia_generate", "imvia_get_account_status", "imvia_get_generation", "imvia_get_state", "imvia_health", "imvia_import_result", "imvia_list_lovart_projects", "imvia_list_pending_jobs", "imvia_lovart_status", "imvia_open_workbench", "imvia_patch_workbench", "imvia_prepare_generation", "imvia_probe_lovart_capabilities", "imvia_record_cost_decision", "imvia_select_lovart_project", "imvia_update_account_status", "imvia_update_job", "imvia_wait_for_workbench_submission"],
+    ["imvia_authorize_lovart_probe", "imvia_claim_cost_decision", "imvia_confirm_generation", "imvia_connect_lovart", "imvia_create_iteration", "imvia_create_lovart_project", "imvia_disconnect_lovart", "imvia_execute_workbench_submission", "imvia_follow_up_generation", "imvia_generate", "imvia_get_account_status", "imvia_get_generation", "imvia_get_state", "imvia_health", "imvia_import_result", "imvia_list_lovart_projects", "imvia_list_pending_jobs", "imvia_lovart_status", "imvia_open_workbench", "imvia_patch_workbench", "imvia_prepare_generation", "imvia_probe_lovart_capabilities", "imvia_record_cost_decision", "imvia_select_lovart_project", "imvia_update_account_status", "imvia_update_job", "imvia_wait_for_workbench_submission"],
   );
 
   const initial = await client.callTool({ name: "imvia_get_state", arguments: {} });
