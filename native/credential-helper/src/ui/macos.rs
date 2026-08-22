@@ -1,5 +1,5 @@
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSAlert, NSApplication, NSApplicationActivationPolicy, NSView, NSSecureTextField, NSTextField};
+use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy, NSView, NSSecureTextField, NSTextField};
 use objc2_foundation::{ns_string, NSPoint, NSRect, NSSize};
 
 use crate::protocol::{CredentialPair, HelperError};
@@ -29,7 +29,8 @@ fn macos_prompt() -> Result<PromptOutcome, HelperError> {
     let access = NSTextField::textFieldWithString(ns_string!(""), mtm);
     access.setPlaceholderString(Some(ns_string!("Access Key")));
     access.setFrame(NSRect::new(NSPoint::new(0.0, 55.0), NSSize::new(320.0, 28.0)));
-    let secret = NSSecureTextField::textFieldWithString(ns_string!(""), mtm);
+    let secret = NSSecureTextField::new(mtm);
+    secret.setStringValue(ns_string!(""));
     secret.setPlaceholderString(Some(ns_string!("Secret Key")));
     secret.setFrame(NSRect::new(NSPoint::new(0.0, 15.0), NSSize::new(320.0, 28.0)));
     let fields = NSView::new(mtm);
@@ -48,6 +49,6 @@ fn macos_prompt() -> Result<PromptOutcome, HelperError> {
     let secret_value = secret.stringValue();
     access.setStringValue(ns_string!(""));
     secret.setStringValue(ns_string!(""));
-    if response.0 != 1000 { return Ok(PromptOutcome::Cancelled); }
+    if response != NSAlertFirstButtonReturn { return Ok(PromptOutcome::Cancelled); }
     CredentialPair::new(access_value.to_string(), secret_value.to_string()).map(PromptOutcome::Candidate)
 }

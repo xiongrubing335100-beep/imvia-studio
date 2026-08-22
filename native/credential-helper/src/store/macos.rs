@@ -1,4 +1,4 @@
-use security_framework::passwords::{delete_generic_password, generic_password, set_generic_password};
+use security_framework::passwords::{delete_generic_password, generic_password, set_generic_password, PasswordOptions};
 use zeroize::Zeroizing;
 
 use crate::protocol::{decode_pair, encode_pair, CredentialPair, HelperError};
@@ -21,7 +21,8 @@ impl CredentialStore for MacCredentialStore {
     }
 
     fn read(&self) -> Result<CredentialPair, HelperError> {
-        let bytes = generic_password(MACOS_SERVICE, MACOS_ACCOUNT).map_err(map_error)?;
+        let options = PasswordOptions::new_generic_password(MACOS_SERVICE, MACOS_ACCOUNT);
+        let bytes = generic_password(options).map_err(map_error)?;
         decode_pair(Zeroizing::new(bytes))
     }
 
