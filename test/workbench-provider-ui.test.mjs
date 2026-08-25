@@ -26,6 +26,15 @@ test("keeps the provider selector and manager visible when catalog loading fails
   assert.match(providerUiSource, /setAttribute\("aria-label", "管理连接"\)/u);
 });
 
+test("initializes the provider UI once after the workbench DOM is ready", () => {
+  assert.match(providerUiSource, /const PROVIDER_INITIALIZATIONS = new WeakMap\(\)/u);
+  assert.match(providerUiSource, /DOMContentLoaded/u);
+  assert.match(providerUiSource, /imvia:workbench-ready/u);
+  assert.match(providerUiSource, /MutationObserver/u);
+  assert.equal((providerUiSource.match(/if \(globalThis\.document\) initializeProviderConnections\(\);/gu) || []).length, 1);
+  assert.match(providerUiSource, /if \(state\.started\) return state/u);
+});
+
 test("renders a borderless custom provider menu that matches the workbench", () => {
   assert.match(providerUiSource, /querySelector\("\.app-header"\)/u);
   assert.match(providerUiSource, /textContent = "管理"/u);
@@ -61,6 +70,7 @@ test("modern connections expose only friendly fields", () => {
     assert.equal(providerUiSource.includes(forbidden), false, forbidden);
   }
   assert.doesNotMatch(providerUiSource, /globalThis\.prompt|window\.prompt/u);
+  assert.match(providerUiSource, /if \(connection\.legacy\) return; \/\/ Legacy records never enter the modern external credential workflow\./u);
 });
 
 test("turns friendly form values into the modern draft payload", () => {

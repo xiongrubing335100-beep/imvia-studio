@@ -1,5 +1,6 @@
 const API_VERSION = "/api/v1";
 const PROVIDER_INSTALLS = new WeakMap();
+const PROVIDER_INITIALIZATIONS = new WeakMap();
 
 function safeModels(models) {
   return Array.isArray(models) ? models.map((value) => ({
@@ -113,4 +114,29 @@ async function installProviderSelectorOnce({ document: documentRoot = globalThis
   trigger.onclick = () => setProviderMenuOpen(selector, trigger.getAttribute("aria-expanded") !== "true"); trigger.onkeydown = (event) => { if (event.key === "Escape") { setProviderMenuOpen(selector, false); trigger.focus(); } }; picker.append(trigger, menu); const manage = documentRoot.createElement("button"); manage.type = "button"; manage.textContent = "管理"; manage.setAttribute("aria-label", "管理连接"); manage.onclick = () => { setProviderMenuOpen(selector, false); openConnectionManager({ document: documentRoot, onChanged: () => installProviderSelector({ document: documentRoot, root }) }); }; selector.append(picker, manage); renderProviderValue(selector, selection.provider_id); if (selector.dataset.imviaOutsideListener !== "true") { selector.dataset.imviaOutsideListener = "true"; documentRoot.addEventListener("pointerdown", (event) => { if (!selector.contains(event.target)) setProviderMenuOpen(selector, false); }, true); } selector.dataset.imviaRenderSignature = renderSignature; documentRoot.dispatchEvent(new CustomEvent("imvia:provider-selection-changed", { detail: { provider_id: selection.provider_id, connection_id: selection.connection_id, model: selection.model, models: filterProviderModels({ provider, connection, mode }) } })); return { installed: true, providers: providers.map(publicProvider), connections };
 }
 export function installProviderSelector({ document: documentRoot = globalThis.document, root = documentRoot } = {}) { if (!documentRoot) return Promise.resolve({ installed: false }); const active = PROVIDER_INSTALLS.get(documentRoot); if (active) return active; const install = installProviderSelectorOnce({ document: documentRoot, root }).finally(() => { if (PROVIDER_INSTALLS.get(documentRoot) === install) PROVIDER_INSTALLS.delete(documentRoot); }); PROVIDER_INSTALLS.set(documentRoot, install); return install; }
+export function initializeProviderConnections({ document: documentRoot = globalThis.document, root = documentRoot } = {}) {
+  if (!documentRoot) return { initialized: false };
+  const existing = PROVIDER_INITIALIZATIONS.get(documentRoot); if (existing) return existing;
+  const state = { initialized: true, started: false, observer: null, install: null };
+  const attempt = () => {
+    if (state.install) return state.install;
+    state.install = installProviderSelector({ document: documentRoot, root }).then((result) => {
+      if (result.installed && state.observer) { state.observer.disconnect(); state.observer = null; }
+      return result;
+    }).catch(() => ({ installed: false })).finally(() => { state.install = null; });
+    return state.install;
+  };
+  const start = () => {
+    if (state.started) return state; state.started = true; void attempt();
+    const Observer = documentRoot.defaultView?.MutationObserver || globalThis.MutationObserver;
+    if (typeof Observer === "function" && documentRoot.body) state.observer = new Observer(() => { void attempt(); });
+    state.observer?.observe(documentRoot.body, { childList: true, subtree: true });
+    return state;
+  };
+  PROVIDER_INITIALIZATIONS.set(documentRoot, state);
+  if (documentRoot.readyState === "loading") documentRoot.addEventListener("DOMContentLoaded", start, { once: true }); else start();
+  documentRoot.addEventListener("imvia:workbench-ready", start, { once: true });
+  return state;
+}
 export function resolveProviderSelection({ providers = [], connections = [], rememberedProvider = "lovart", rememberedConnection = null, rememberedModel = "Auto", explicitProviderSelection = false } = {}) { const lovart = providers.find((provider) => provider?.id === "lovart"); const external = providers.find((provider) => provider?.id === rememberedProvider && provider.id !== "lovart"); const connection = connections.find((item) => item?.connection_id === rememberedConnection && isSelectableConnection({ providerId: rememberedProvider, connection: item })); if (external && connection) return { provider_id: external.id, connection_id: connection.connection_id, model: String(rememberedModel || "Auto") }; if (!explicitProviderSelection) { const automatic = connections.find((item) => item?.provider_id !== "lovart" && item?.enabled === true && providers.some((provider) => provider?.id === item.provider_id)); if (automatic) return { provider_id: automatic.provider_id, connection_id: automatic.connection_id, model: "Auto" }; } return { provider_id: lovart?.id || "lovart", connection_id: null, model: "Auto" }; }
+if (globalThis.document) initializeProviderConnections();
