@@ -31,6 +31,15 @@ test("loopback HTTP server reads and revision-patches the same local workbench s
   });
   assert.equal(conflict.status, 409);
   assert.equal((await conflict.json()).error.code, "REVISION_CONFLICT");
+
+  const renamed = await fetch(`${server.url}/api/v1/projects/${initial.data.project.id}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "已持久化的项目名" }),
+  });
+  assert.equal(renamed.status, 200);
+  assert.equal((await renamed.json()).data.project.name, "已持久化的项目名");
+  assert.equal((await fetch(`${server.url}/api/v1/state`).then((response) => response.json())).data.project.name, "已持久化的项目名");
 });
 
 test("multiple loopback HTTP servers receive distinct default ports", async (context) => {
@@ -104,7 +113,7 @@ test("workbench connection routes expose only redacted Lovart status", async (co
   assert.equal(JSON.stringify(connected).includes("secretKey"), false);
 });
 
-test("workbench connects through form navigation when page request APIs are unavailable", async (context) => {
+test("legacy workbench connect keeps the page alive while the native form is open", async (context) => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-http-lovart-form-"));
   const calls = [];
   const server = await startHttpServer({
@@ -130,11 +139,12 @@ test("workbench connects through form navigation when page request APIs are unav
   const bridgeSource = await fetch(`${server.url}${bridgePath}`).then((response) => response.text());
   assert.equal(bridgePath, "/assets/imvia-lovart-bridge-v3.js");
   assert.match(bridgeSource, /\/api\/v1\/lovart\/connect/);
-  assert.match(bridgeSource, /EventSource\("\/api\/v1\/events"\)/);
+  assert.doesNotMatch(bridgeSource, /EventSource\("\/api\/v1\/events"\)/);
 
   const connected = await fetch(`${server.url}/workbench/lovart/connect`, { method: "POST", redirect: "manual" });
-  assert.equal(connected.status, 303);
-  assert.equal(connected.headers.get("location"), "/workbench?imvia=live");
+  assert.equal(connected.status, 200);
+  assert.equal(connected.headers.get("location"), null);
+  assert.equal((await connected.json()).data.status, "connected");
   assert.deepEqual(calls, ["connect"]);
 });
 
@@ -242,11 +252,13 @@ test("SSE forwards job lifecycle events", async (context) => {
   const nextEvent = reader.read().then(({ value }) => new TextDecoder().decode(value));
   await service.updateJob({ job_id: job.id, expected_status: "queued_for_agent", next_status: "uploading", attempt: 1, source: "fixture:sse" });
 
-  assert.match(await nextEvent, /event: job\.updated/);
+  const event = await nextEvent;
+  assert.match(event, /event: job\.updated/);
+  assert.match(event, /正在准备并上传素材到 Lovart/u);
   await reader.cancel();
 });
 
-test("HTTP exposes project context and derives workbench Lovart activation", async (context) => {
+test("HTTP exposes project context and rejects direct browser Lovart execution", async (context) => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-http-projects-"));
   const calls = [];
   const projectContextService = {
@@ -270,9 +282,9 @@ test("HTTP exposes project context and derives workbench Lovart activation", asy
   const created = await fetch(`${server.url}/api/v1/lovart/projects/create`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "新项目" }) }).then((response) => response.json());
   assert.equal(created.data.project_id, "project-new");
   const generated = await fetch(`${server.url}/api/v1/generations`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: "A red apple", idempotency_key: "http-job" }) });
-  assert.equal(generated.status, 202);
-  assert.equal(calls.find(([name]) => name === "submit")[1].activation.source, "workbench_action");
-  assert.equal(JSON.stringify(generated).includes("accessKey"), false);
+  assert.equal(generated.status, 400);
+  assert.equal((await generated.json()).error.code, "WORKBENCH_BRIDGE_REQUIRED");
+  assert.equal(calls.some(([name]) => name === "submit"), false);
   const rejectedActivation = await fetch(`${server.url}/api/v1/generations`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: "bad", activation: { source: "codex_explicit" }, idempotency_key: "http-bad" }) });
   assert.equal(rejectedActivation.status, 400);
 });

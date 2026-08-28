@@ -9,7 +9,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { createServer } from "../src/index.js";
 
-async function connect(context) {
+async function connect(context, { onboardingService } = {}) {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-mcp-lovart-"));
   const credentialService = {
     async status() { return { status: "connected", checked_at: "2026-08-21T00:00:00.000Z" }; },
@@ -19,7 +19,7 @@ async function connect(context) {
     async generate(input) { return { final_status: "done", thread_id: "thread-1", project_id: input.project_id || null, items: [] }; },
     async confirm(input) { return { final_status: "done", thread_id: input.thread_id, items: [] }; },
   };
-  const server = createServer({ service: {}, probeService: { async authorize() {}, async probe() {} }, credentialService, generationService, dataDirectory });
+  const server = createServer({ service: {}, probeService: { async authorize() {}, async probe() {} }, credentialService, generationService, onboardingService, dataDirectory });
   const client = new Client({ name: "imvia-lovart-contract-test", version: "0.3.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
@@ -32,6 +32,18 @@ async function connect(context) {
   return client;
 }
 
+test("explicit Lovart connection reopens credential replacement when already connected", async (context) => {
+  const client = await connect(context, {
+    onboardingService: {
+      async replace() { return { state: "setup_active", code: "SETUP_ACTIVE" }; },
+      async retry() { return { state: "connected", code: "CONNECTED" }; },
+      async disconnect() { return { state: "setup_required", code: "DISCONNECTED" }; },
+    },
+  });
+  const result = await client.callTool({ name: "imvia_connect_lovart", arguments: {} });
+  assert.deepEqual(result.structuredContent.data, { state: "setup_active", code: "SETUP_ACTIVE" });
+});
+
 test("MCP exposes the four no-terminal Lovart workbench tools", async (context) => {
   const client = await connect(context);
   const names = (await client.listTools()).tools.map((tool) => tool.name);
@@ -40,13 +52,13 @@ test("MCP exposes the four no-terminal Lovart workbench tools", async (context) 
   }
 });
 
-test("connection and status return redacted status envelopes", async (context) => {
+test("connection request and status return redacted status envelopes", async (context) => {
   const client = await connect(context);
   const connected = await client.callTool({ name: "imvia_connect_lovart", arguments: {} });
   assert.deepEqual(connected.structuredContent, {
     api_version: "1",
     ok: true,
-    data: { state: "connected", code: "CONNECTED", checked_at: "2026-08-21T00:00:00.000Z" },
+    data: { state: "setup_active", code: "SETUP_ACTIVE" },
   });
   const status = await client.callTool({ name: "imvia_lovart_status", arguments: {} });
   assert.deepEqual(status.structuredContent.data, { status: "connected", checked_at: "2026-08-21T00:00:00.000Z" });
@@ -70,7 +82,10 @@ test("generation and confirmation use strict inputs and preserve explicit confir
 test("activation-aware generation requires explicit Lovart context and exposes no credential fields", async (context) => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-mcp-activation-"));
   const orchestrator = {
-    async submit(input) { return { job: { id: "job-1", status: "succeeded", activation: input.activation }, result: { final_status: "done" } }; },
+    async submit(input, { onProgress } = {}) {
+      await onProgress?.({ phase: "generating", status: "generating", message: "Lovart 正在生成，状态会持续同步。" });
+      return { job: { id: "job-1", status: "succeeded", activation: input.activation }, result: { final_status: "done" } };
+    },
     async followUp(input) { return { job: { id: "follow-1", status: "queued_for_agent", activation: input.activation }, result: { final_status: "queued" } }; },
     async get() { return { job: { id: "job-1", status: "succeeded" }, artifacts: [] }; },
     async confirm(input) { return { job: { id: input.job_id, status: "succeeded" }, result: { final_status: "done" } }; },
@@ -91,8 +106,14 @@ test("activation-aware generation requires explicit Lovart context and exposes n
   const tool = (await client.listTools()).tools.find((item) => item.name === "imvia_generate");
   assert.ok(tool);
   assert.equal(JSON.stringify(tool.inputSchema).includes("access_key"), false);
-  const result = await client.callTool({ name: "imvia_generate", arguments: { prompt: "use Lovart", activation: { source: "codex_explicit" }, idempotency_key: "job-1" } });
+  const progress = [];
+  const result = await client.callTool(
+    { name: "imvia_generate", arguments: { prompt: "use Lovart", activation: { source: "codex_explicit" }, idempotency_key: "job-1" } },
+    undefined,
+    { onprogress: (update) => progress.push(update) },
+  );
   assert.equal(result.structuredContent.data.job.activation.source, "codex_explicit");
+  assert.ok(progress.some((update) => /Lovart 正在生成/u.test(update.message)));
   const followUp = await client.callTool({ name: "imvia_follow_up_generation", arguments: { parent_job_id: "parent-1", artifact_id: "artifact-1", instruction: "make it dusk", activation: { source: "codex_context_continuation", parent_job_id: "parent-1", artifact_id: "artifact-1" }, idempotency_key: "follow-1" } });
   assert.equal(followUp.structuredContent.data.job.activation.source, "codex_context_continuation");
   assert.equal(JSON.stringify(followUp).includes("accessKey"), false);

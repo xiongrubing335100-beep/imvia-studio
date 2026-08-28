@@ -37,7 +37,7 @@ async function createHarness(context) {
     async prepareWorkspaceAsset(input) { calls.push(["prepareWorkspaceAsset", input]); return { file_path: workspaceAsset }; },
     async downloadResults(input) { calls.push(["downloadResults", input]); return { artifacts: [{ kind: "image", local_path: resultFile, source_url: "https://cdn.lovart.ai/result.png", source_artifact_id: "artifact-source-1" }] }; },
   };
-  return { calls, workbenchService, projectContextService, generationService, artifactTransfer, orchestrator: createGenerationOrchestrator({ projectContextService, workbenchService, generationService, artifactTransfer }) };
+  return { calls, dataDirectory, workbenchService, projectContextService, generationService, artifactTransfer, orchestrator: createGenerationOrchestrator({ projectContextService, workbenchService, generationService, artifactTransfer }) };
 }
 
 test("creates one project, submits, and imports a direct result", async (context) => {
@@ -86,6 +86,125 @@ test("Codex executes the exact queued workbench submission instead of creating a
   assert.equal(calls.find(([name]) => name === "generate")[1].prompt, "  Workbench prompt byte-for-byte\n");
   assert.equal(calls.find(([name]) => name === "generate")[1].project_id, "project-workbench");
   assert.equal((await workbenchService.getState({ include: ["jobs"] })).jobs.length, 1);
+});
+
+test("Auto leaves a split-image prompt unconstrained and imports every returned artifact", async (context) => {
+  const { calls, dataDirectory, generationService, artifactTransfer, workbenchService, orchestrator } = await createHarness(context);
+  const prompt = "Split the reference into every independently useful image.";
+  const splitFiles = await Promise.all(["split-1", "split-2", "split-3"].map(async (id) => {
+    const file = path.join(dataDirectory, "results", `${id}.png`);
+    await writeFile(file, id, { mode: 0o600 });
+    return [id, file];
+  }));
+  const splitPaths = new Map(splitFiles);
+  generationService.generate = async (input) => {
+    calls.push(["generate", input]);
+    return {
+      final_status: "done",
+      thread_id: "thread-split",
+      project_id: input.project_id,
+      items: [{
+        artifacts: [
+          { type: "image", content: "https://cdn.lovart.ai/split-1.png", artifact_id: "split-1" },
+          { type: "image", content: "https://cdn.lovart.ai/split-2.png", artifact_id: "split-2" },
+          { type: "image", content: "https://cdn.lovart.ai/split-3.png", artifact_id: "split-3" },
+        ],
+      }],
+    };
+  };
+  artifactTransfer.downloadResults = async ({ result }) => ({
+    artifacts: result.items.flatMap((item) => item.artifacts).map((artifact) => ({
+      kind: "image",
+      local_path: splitPaths.get(artifact.artifact_id),
+      source_url: artifact.content,
+      source_artifact_id: artifact.artifact_id,
+    })),
+  });
+  const queued = await workbenchService.createWorkbenchSubmission({
+    snapshot: {
+      mode: "image",
+      model: "Image 2",
+      prompt: { text: prompt, tokens: [] },
+      attachments: [],
+      settings: { count_mode: "auto", count: null },
+    },
+    idempotency_key: "workbench-auto-split",
+  });
+
+  const output = await orchestrator.executePrepared({ job_id: queued.job.id });
+  const generated = calls.find(([name]) => name === "generate")[1];
+  const state = await workbenchService.getState({ include: ["jobs", "artifacts"] });
+
+  assert.equal(generated.prompt, prompt);
+  assert.equal(Object.hasOwn(generated, "count"), false);
+  assert.equal(output.job.status, "succeeded");
+  assert.deepEqual(
+    state.artifacts.filter((artifact) => artifact.job_id === queued.job.id).map((artifact) => artifact.source_artifact_id),
+    ["split-1", "split-2", "split-3"],
+  );
+});
+
+test("maps the Image 2 workbench label to Lovart's uppercase provider preference", async (context) => {
+  const { calls, workbenchService, orchestrator } = await createHarness(context);
+  await workbenchService.setLovartProject({ project_id: "project-image-2", source: "user_selected" });
+  const queued = await workbenchService.createWorkbenchSubmission({
+    snapshot: {
+      mode: "image",
+      model: "Image 2",
+      prompt: { text: "Generate with Image 2.", tokens: [] },
+      attachments: [],
+      settings: { ratio: "3:4", resolution: "2K", count: 1 },
+    },
+    idempotency_key: "workbench-image-2-provider-model",
+  });
+
+  await orchestrator.executePrepared({ job_id: queued.job.id });
+
+  const generated = calls.find(([name]) => name === "generate");
+  assert.deepEqual(generated[1].prefer_models, { IMAGE: ["generate_image_gpt_image_2"] });
+});
+
+test("records an attachment upload failure at the upload stage with safe provider details", async (context) => {
+  const { generationService, workbenchService, orchestrator } = await createHarness(context);
+  generationService.upload = async () => {
+    const error = new Error("Lovart rejected the reference upload: unsupported media.");
+    error.code = "UPSTREAM_UNAVAILABLE";
+    error.operation = "upload";
+    error.details = { operation: "upload", provider_code: 2402, provider_message: "unsupported media" };
+    throw error;
+  };
+  const queued = await workbenchService.createWorkbenchSubmission({
+    snapshot: {
+      mode: "image",
+      model: "Image 2",
+      prompt: { text: "Use this managed reference.", tokens: [] },
+      attachments: ["imvia-workbench:/assets/sample.png"],
+      settings: { ratio: "3:4", resolution: "2K", count: 1 },
+    },
+    idempotency_key: "workbench-upload-stage-failure",
+  });
+
+  await assert.rejects(() => orchestrator.executePrepared({ job_id: queued.job.id }), (error) => error.operation === "upload");
+  const failed = (await workbenchService.getState({ include: ["jobs"] })).jobs.find((job) => job.id === queued.job.id);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.status_message, "Lovart 参考素材上传失败。");
+  assert.equal(failed.error.source, "imvia:lovart_upload");
+  assert.deepEqual(failed.error.details, { operation: "upload", provider_code: 2402, provider_message: "unsupported media" });
+});
+
+test("workbench execution exposes live Codex progress and a final status message", async (context) => {
+  const { workbenchService, orchestrator } = await createHarness(context);
+  const queued = await workbenchService.createWorkbenchSubmission({
+    snapshot: { mode: "video", prompt: { text: "Progressive video", tokens: [] }, attachments: [], settings: {} },
+    idempotency_key: "workbench-progress-1",
+  });
+  const updates = [];
+  const output = await orchestrator.executePrepared({ job_id: queued.job.id }, { onProgress: (update) => updates.push(update) });
+  assert.equal(output.job.status, "succeeded");
+  assert.equal(output.job.status_message, "Lovart 已完成生成。");
+  assert.ok(updates.some((update) => update.phase === "accepted"));
+  assert.ok(updates.some((update) => update.phase === "calling_lovart"));
+  assert.ok(updates.some((update) => update.phase === "completed"));
 });
 
 test("explicit project is validated without changing the active project", async (context) => {

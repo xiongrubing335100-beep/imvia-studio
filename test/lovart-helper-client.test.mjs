@@ -41,6 +41,61 @@ function fakeSpawn(script, { candidate, result = { status: "connected", code: "C
   return child;
 }
 
+test("sends validated profile metadata and supports dynamic candidate values", async () => {
+  const child = fakeSpawn("configure");
+  child.stdin.write = function write(value) {
+    this.writes.push(String(value));
+    if (String(value).includes('"type":"request"')) {
+      queueMicrotask(() => child.stdout.emit("data", Buffer.from(`${JSON.stringify({
+        v: 1, type: "candidate", values: { api_key: "private-dynamic" },
+      })}\n`)));
+    }
+    if (String(value).includes('"type":"verdict"')) {
+      queueMicrotask(() => child.stdout.emit("data", Buffer.from(`${JSON.stringify({ v: 1, type: "result", status: "connected", code: "CONNECTED" })}\n`)));
+    }
+  };
+  const client = createHelperClient({ resolveHelper: async () => ({ path: "/plugin/native/helper" }), spawnImpl: () => child });
+  const fields = [{ id: "api_key", label: "API Key", secret: true, required: true }];
+  const result = await client.configure({
+    profileId: "profile-primary",
+    fields,
+    validate: async (values) => {
+      assert.deepEqual(values, { api_key: "private-dynamic" });
+      return { accepted: true, code: "CONNECTED", message: "private-dynamic accepted" };
+    },
+  });
+  assert.deepEqual(result, { status: "connected", code: "CONNECTED" });
+  const request = JSON.parse(child.stdin.writes[0]);
+  assert.equal(request.profile_id, "profile-primary");
+  assert.deepEqual(request.fields, fields);
+  const verdict = JSON.parse(child.stdin.writes[1]);
+  assert.equal(Object.hasOwn(verdict, "message"), false);
+  assert.equal(JSON.stringify(result).includes("private-dynamic"), false);
+});
+
+test("validates profile IDs and dynamic fields before spawning", async () => {
+  let spawns = 0;
+  const client = createHelperClient({
+    resolveHelper: async () => ({ path: "/plugin/native/helper" }),
+    spawnImpl: () => { spawns += 1; return fakeSpawn("status"); },
+  });
+  await assert.rejects(client.status({ profileId: "../legacy" }), (error) => error.code === "VALIDATION_FAILED");
+  await assert.rejects(client.configure({ profileId: "profile-primary", fields: [{ id: "../../secret", label: "Secret", secret: true, required: true }], validate: async () => ({ accepted: true, code: "CONNECTED" }) }), (error) => error.code === "VALIDATION_FAILED");
+  assert.equal(spawns, 0);
+});
+
+test("reads dynamic profile values while legacy reads keep the Lovart pair shape", async () => {
+  const dynamicChild = fakeSpawn("read", { result: { status: "connected", values: { api_key: "private-dynamic" } } });
+  const client = createHelperClient({ resolveHelper: async () => ({ path: "/plugin/native/helper" }), spawnImpl: () => dynamicChild });
+  assert.deepEqual(await client.read({ profileId: "profile-primary" }), { api_key: "private-dynamic" });
+});
+
+test("drops arbitrary helper result messages from redacted status envelopes", async () => {
+  const child = fakeSpawn("status", { result: { status: "connected", code: "CONNECTED", message: "private-status-secret" } });
+  const client = createHelperClient({ resolveHelper: async () => ({ path: "/plugin/native/helper" }), spawnImpl: () => child });
+  assert.deepEqual(await client.status(), { status: "connected", code: "CONNECTED" });
+});
+
 test("configures through the fixed operation and redacts the public result", async () => {
   const calls = [];
   const states = [];
@@ -66,6 +121,21 @@ test("configures through the fixed operation and redacts the public result", asy
   assert.equal(calls[0].options.shell, false);
   assert.equal(calls[0].options.windowsHide, true);
   assert.equal(JSON.stringify(result).includes("private"), false);
+});
+
+test("keeps the native credential dialog alive while the user is entering keys", async () => {
+  const client = createHelperClient({
+    resolveHelper: async () => ({ path: "/plugin/native/helper" }),
+    timeoutMs: 5,
+    spawnImpl: (_file, args) => fakeSpawn(args[0]),
+  });
+  const result = await client.configure({
+    validate: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return { accepted: true, code: "CONNECTED" };
+    },
+  });
+  assert.deepEqual(result, { status: "connected", code: "CONNECTED" });
 });
 
 test("passes only locale and local-store path metadata to the helper", async () => {

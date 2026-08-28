@@ -12,13 +12,14 @@ import { DomainError } from "../src/domain/errors.js";
 import { createServer } from "../src/index.js";
 
 const expectedTools = [
-  "imvia_authorize_lovart_probe", "imvia_claim_cost_decision",
+  "imvia_authorize_lovart_probe", "imvia_claim_cost_decision", "imvia_claim_next_workbench_dispatch",
   "imvia_confirm_generation", "imvia_connect_lovart", "imvia_create_iteration",
-  "imvia_disconnect_lovart",
+  "imvia_disconnect_lovart", "imvia_execute_workbench_submission",
   "imvia_generate", "imvia_get_account_status", "imvia_get_state", "imvia_health",
-  "imvia_import_result", "imvia_list_pending_jobs", "imvia_lovart_status", "imvia_open_workbench",
+  "imvia_get_bridge_status", "imvia_heartbeat_conversation_bridge", "imvia_import_result", "imvia_list_pending_jobs",
+  "imvia_list_provider_connections", "imvia_list_providers", "imvia_lovart_status", "imvia_mark_dispatch_host_accepted", "imvia_open_workbench",
   "imvia_patch_workbench", "imvia_prepare_generation", "imvia_probe_lovart_capabilities",
-  "imvia_record_cost_decision", "imvia_update_account_status", "imvia_update_job",
+  "imvia_record_cost_decision", "imvia_register_conversation_bridge", "imvia_release_dispatch_claim", "imvia_test_provider_connection", "imvia_update_account_status", "imvia_update_job",
 ].sort();
 
 const originalSchemaHashes = {
@@ -30,7 +31,7 @@ const originalSchemaHashes = {
   imvia_create_iteration: "12481d8e22f770acca289535797752a49c6d11c865792186343bce820c693bb6",
   imvia_prepare_generation: "dfbbde3e4dcd7274d9121ae5298075195abd28f223f636c668c05209f98f1ebc",
   imvia_list_pending_jobs: "3c1b5ddddb0ca52a485e51db0e91613647baf07746188f99248107c9a69f7d3a",
-  imvia_update_job: "f01ec034b77e2d7c97d92173a308bb64facb304cd686f67024c496311773455a",
+  imvia_update_job: "098bd8c4752e927fe2268ea62de1fe9ca18550310876813a3ae95fa2b014eca1",
   imvia_record_cost_decision: "7c6a7d65f689c39517c224cf2a98d5d6a04565f0f6909022b9a3bd4b5e5c1d8e",
   imvia_claim_cost_decision: "f8394b19dedaa2252b9edf3e6d4f9c593414b0d0136f9d069eb624b8d354f7f9",
   imvia_import_result: "e7c9dee35ba83ac6292d71aa5cdd9e0a4841f4dae7b50bc0ad3ac6e19b00c632",
@@ -72,6 +73,35 @@ test("MCP exposes exactly two new probe tools and preserves all original schemas
     const tool = tools.find((candidate) => candidate.name === name);
     assert.ok(tool, name);
     assert.equal(schemaHash(tool.inputSchema), expectedHash, name);
+  }
+});
+
+test("MCP recursively redacts sensitive domain and bridge error details", async (context) => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-mcp-redaction-"));
+  const sensitive = {
+    nested: { authorization: "Bearer hidden", credential_values: { api_key: "hidden-key" } },
+    values: [{ api_key: "hidden-array-key" }, { safe: "visible" }],
+  };
+  const server = createServer({
+    service: {},
+    probeService: { async authorize() {}, async probe() {} },
+    dataDirectory,
+    connectionStore: { async get() { throw new DomainError("NOT_FOUND", "missing", sensitive); }, async list() { return []; } },
+    bridgeService: { async getSessionStatus() { throw new DomainError("SESSION_TOKEN_INVALID", "bad", sensitive); } },
+  });
+  const client = new Client({ name: "imvia-mcp-redaction-test", version: "0.1.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  context.after(async () => { await client.close(); await server.close(); await rm(dataDirectory, { recursive: true, force: true }); });
+
+  for (const request of [
+    { name: "imvia_test_provider_connection", arguments: { connection_id: "missing" } },
+    { name: "imvia_get_bridge_status", arguments: { session_id: "session" } },
+  ]) {
+    const result = await client.callTool(request);
+    const encoded = JSON.stringify(result.structuredContent);
+    for (const forbidden of ["authorization", "credential_values", "api_key", "hidden", "Bearer"]) assert.equal(encoded.includes(forbidden), false, `${request.name}: ${forbidden}`);
   }
 });
 

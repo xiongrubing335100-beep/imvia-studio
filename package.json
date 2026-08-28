@@ -15,11 +15,13 @@
     "enable:lovart-readonly-probe": "node scripts/set-lovart-readonly-probe.mjs enable",
     "disable:lovart-readonly-probe": "node scripts/set-lovart-readonly-probe.mjs disable",
     "test:probe": "node --test test/json-store.test.mjs test/probe-*.test.mjs test/capability-normalizer.test.mjs test/mcp-probe.test.mjs",
+    "test:providers": "node --test test/provider-*.test.mjs test/model-catalog.test.mjs test/openai-compatible-images.test.mjs test/workbench-provider-selection.test.mjs test/workbench-provider-ui.test.mjs test/provider-e2e.test.mjs",
     "test:mcp": "node --test test/mcp-health.test.mjs test/mcp-probe.test.mjs",
     "test:protection": "node --test test/protected-paths.test.mjs",
     "verify:protected-paths": "node scripts/verify-protected-paths.mjs verify test/protected-paths.manifest.json"
   },
   "dependencies": {
+    "@modelcontextprotocol/ext-apps": "1.7.5",
     "@modelcontextprotocol/sdk": "1.30.0",
     "zod": "3.25.76"
   }

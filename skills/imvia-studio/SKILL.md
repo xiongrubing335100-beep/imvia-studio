@@ -1,11 +1,16 @@
 ---
 name: imvia-studio
-description: Run IMVIA Studio's fixture-only orchestration, independent first-run Lovart credential onboarding, optional read-only probe, and explicitly activated creation flow without exposing credentials or touching the existing Lovart plugin.
+description: Use when the user explicitly selects or @-mentions IMVIA Studio, names IMVIA Studio, or asks to open or launch the IMVIA Studio workbench; not for Imvia Layer or UI/poster layer splitting.
 ---
 
 # IMVIA Studio
 
 ## Open the web workbench
+
+IMVIA Studio and Imvia Layer are separate plugins. A request that names,
+selects, or links `plugin://imvia-studio@personal` is identity-bound to this
+skill, even when its remaining text only says "open the workbench". Never route such a request to Imvia Layer. Use Imvia Layer only when the user explicitly
+names it or asks to split a UI or poster into layers.
 
 When the user asks to open, launch, or use IMVIA Studio, call
 `imvia_open_workbench` with `{}`. It returns a local `workbench_url`.
@@ -16,23 +21,51 @@ panel. Do not ask the user to start a terminal, paste a URL, or run a local
 server command. The page uses the same local IMVIA state and HTTP/SSE service
 as the MCP tools. The original Lovart plugin remains independent.
 
-Keep the current task active after opening the panel. Read the returned
-`submission_cursor`, then call `imvia_wait_for_workbench_submission` with that
-cursor. A timeout means the user has not clicked the workbench submit button
-yet; it is not a failure and must not call Lovart. Continue waiting while the
-current workbench task is active. When the tool returns `submitted: true`,
-read and summarize its immutable `snapshot` as the user's message to Codex,
-then call `imvia_execute_workbench_submission` with that exact `job_id`.
-Never create a second job with `imvia_generate` for the same workbench
-submission.
+For a modern external API connection, configure only an optional API name plus
+the API address and API Key; the key stays in the IMVIA-owned secure credential
+dialog and never enters chat or a workbench JSON form. Choose the external model
+ID only from that connection's discovered model catalog. Do not invent a model
+ID or manually configure protocol, endpoint, capability, or request-mapping
+fields.
 
-The workbench button only hands the summarized form to Codex. It never calls
-Lovart directly. Saving a project address only normalizes and remembers it
-locally; project validation, automatic project creation, uploads, and all
-Lovart side effects begin only when Codex executes the received submission.
-The button click is the explicit task-scoped Lovart activation. If execution
-returns a pending cost, stop and ask for the required current-session decision
-under the cost-confirmation rules below.
+Keep the current task active after opening the panel. `imvia_open_workbench`
+creates a durable workbench session and mounts the MCP Apps conversation bridge;
+its initial `bridge_state` is `mounting`, not “connected”. The bridge registers
+with `imvia_register_conversation_bridge`, sends each claimed workbench message
+through the host `ui/message` channel, and marks delivery only after the Codex
+host accepts that message. Do not poll the old
+`imvia_wait_for_workbench_submission` tool as the primary handoff mechanism and
+do not describe a browser-side queue write as a delivered Codex message.
+
+When a bridge message arrives, read the immutable task envelope's frozen
+`provider_id`, `provider_label`, `connection_id`, and `snapshot_digest` before
+choosing any provider-specific wording or action. Immediately return a visible
+assistant update such as “已收到工作台任务，正在准备调用 <provider_label>”，then
+summarize the envelope and call `imvia_execute_workbench_submission` with the
+exact `job_id` and `snapshot_digest`. Never create a second job with
+`imvia_generate` for the same workbench submission. For an external provider,
+never call a Lovart tool or capability: the execution tool must route only to
+the frozen API connection through its frozen provider adapter, and a failure
+must remain an external-provider failure. Never call or fall back to Lovart for an external provider job. Call Lovart only when the immutable snapshot's
+`provider_id` is exactly `lovart`.
+
+The execution tool reports MCP progress notifications. Relay those updates in
+the current Codex task while the work is running: receipt/acceptance, asset
+upload, selected-provider submission, generating/polling, result import,
+failure, or cost confirmation. Do not end the task with only
+`queued_for_agent`; the user must see a current status message. A pending cost
+is a hard stop: show the amount and unit, then wait for an explicit
+current-session decision.
+
+The workbench button only writes an immutable task envelope to the local durable
+outbox. It never calls a generation provider directly. Saving a project address
+only normalizes and remembers it locally; validation, uploads, generation, and
+all provider side effects begin only when Codex executes the received submission
+through the MCP tool. The button click explicitly activates only the provider
+frozen in that task snapshot. An external `provider_id` activates only its
+configured API connection and blocks Lovart; `provider_id: lovart` activates
+only Lovart. If execution returns a pending cost, stop and ask for the required
+current-session decision under the cost-confirmation rules below.
 
 ## Milestone 5 fixture-only gate
 
@@ -68,11 +101,12 @@ Keep Codex's native generation capability and IMVIA/Lovart in separate provider
 contexts. A request may use Lovart only when the user explicitly addresses the
 plugin with `@`, names Lovart or IMVIA Studio, asks to use the Lovart plugin, or
 continues a clearly related active Lovart task with a parent job or artifact.
-Clicking a workbench action such as **发送生成** or **继续编辑** is also an
-explicit Lovart selection. The workbench first sends an immutable summary to
-Codex; Codex then executes that exact job with
-`imvia_execute_workbench_submission`. The activation remains task-scoped and
-is stored as `workbench_action` on that submission.
+Clicking a workbench action such as **发送生成** or **继续编辑** is an explicit
+selection of the provider frozen in the immutable task snapshot. The workbench
+first sends that immutable summary to Codex; Codex then executes that exact job
+with `imvia_execute_workbench_submission`. An external provider selection must
+never activate or fall back to Lovart. A Lovart selection remains task-scoped
+and is stored as `workbench_action` on that submission.
 
 If the user only asks for a generic image or video, use Codex's native ImageGen
 or video capability. A saved key, a connected status, an active Lovart project,

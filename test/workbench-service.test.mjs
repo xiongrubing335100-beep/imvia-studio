@@ -30,6 +30,23 @@ test("initializes and reloads a private local project and draft", async (context
   assert.equal(reloaded.draft.revision, 0);
 });
 
+test("renames the active local project and persists the name", async (context) => {
+  const { dataDirectory, service } = await createTestService(context);
+  const initial = await service.getState();
+
+  const renamed = await service.renameProject({
+    project_id: initial.project.id,
+    name: "秋日人物海报",
+  });
+
+  assert.equal(renamed.project.name, "秋日人物海报");
+  assert.equal((await createWorkbenchService({ dataDirectory }).getState()).project.name, "秋日人物海报");
+  await assert.rejects(
+    () => service.renameProject({ project_id: initial.project.id, name: "   " }),
+    (error) => error.code === "VALIDATION_FAILED",
+  );
+});
+
 test("persists the active Lovart project separately from the local project", async (context) => {
   const { service } = await createTestService(context);
   const selected = await service.setLovartProject({
@@ -79,6 +96,21 @@ test("migrates legacy Lovart project ids without changing the local project", as
   const backupNames = (await readdir(dataDirectory)).filter((entry) => entry.includes("backup-v1-to-v2"));
   assert.equal(backupNames.length, 1);
   assert.equal(JSON.parse(await readFile(path.join(dataDirectory, backupNames[0]), "utf8")).schema_version, "1");
+});
+
+test("migrates the misleading queued handoff message to the session-bridge wording", async (context) => {
+  const { dataDirectory, service } = await createTestService(context);
+  const submitted = await service.createWorkbenchSubmission({
+    idempotency_key: "bridge-message-1",
+    snapshot: { mode: "image", prompt: { text: "Bridge message", tokens: [] }, attachments: [], settings: {} },
+  });
+  const statePath = path.join(dataDirectory, "state.json");
+  const state = JSON.parse(await readFile(statePath, "utf8"));
+  state.jobs.find((job) => job.id === submitted.job.id).status_message = "已发送给 Codex，等待处理。";
+  await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+
+  const reloaded = await createWorkbenchService({ dataDirectory }).getState({ include: ["jobs"] });
+  assert.equal(reloaded.jobs[0].status_message, "任务已保存，等待会话桥发送到当前 Codex 会话。");
 });
 
 test("creates an immutable direct Lovart job snapshot with live activation evidence", async (context) => {
@@ -242,6 +274,112 @@ test("stores a workbench button submission as an immutable Codex handoff without
   const [stored] = await service.listPendingJobs();
   assert.equal(stored.snapshot.prompt.text, "  Use the two references.\n");
   assert.equal(stored.lovart_project_id, "project-from-form");
+});
+
+test("defaults an image workbench submission to an unconstrained Auto count", async (context) => {
+  const { service } = await createTestService(context);
+
+  const submitted = await service.createWorkbenchSubmission({
+    snapshot: {
+      mode: "image",
+      model: "Image 2",
+      prompt: { text: "Split this image into every useful component.", tokens: [] },
+      attachments: [],
+      settings: { ratio: "3:4", resolution: "2K" },
+    },
+    idempotency_key: "browser-image-auto-count",
+  });
+
+  assert.equal(submitted.job.snapshot.settings.count_mode, "auto");
+  assert.equal(submitted.job.snapshot.settings.count, null);
+});
+
+test("normalizes a legacy numeric image count as fixed", async (context) => {
+  const { service } = await createTestService(context);
+
+  const submitted = await service.createWorkbenchSubmission({
+    snapshot: {
+      mode: "image",
+      model: "Image 2",
+      prompt: { text: "Generate four variations.", tokens: [] },
+      attachments: [],
+      settings: { ratio: "3:4", resolution: "2K", count: 4 },
+    },
+    idempotency_key: "browser-image-legacy-fixed-count",
+  });
+
+  assert.equal(submitted.job.snapshot.settings.count_mode, "fixed");
+  assert.equal(submitted.job.snapshot.settings.count, 4);
+});
+
+test("rejects an Auto image count that also forces a number", async (context) => {
+  const { service } = await createTestService(context);
+
+  await assert.rejects(
+    () => service.createWorkbenchSubmission({
+      snapshot: {
+        mode: "image",
+        model: "Image 2",
+        prompt: { text: "Do not truncate a split-image task.", tokens: [] },
+        attachments: [],
+        settings: { count_mode: "auto", count: 2 },
+      },
+      idempotency_key: "browser-image-invalid-auto-count",
+    }),
+    (error) => error.code === "VALIDATION_FAILED" && error.details.field === "snapshot.settings.count",
+  );
+});
+
+test("normalizes the rendered Image 2 icon text before freezing a workbench submission", async (context) => {
+  const { service } = await createTestService(context);
+  const submitted = await service.createWorkbenchSubmission({
+    snapshot: {
+      mode: "image",
+      model: "I2Image 2",
+      prompt: { text: "Use the selected image model.", tokens: [] },
+      attachments: [],
+      settings: { ratio: "3:4", resolution: "2K", count: 1 },
+    },
+    idempotency_key: "browser-image-2-label",
+  });
+
+  assert.equal(submitted.job.snapshot.model, "Image 2");
+});
+
+test("rejects a workbench model that cannot be mapped to a local capability", async (context) => {
+  const { service } = await createTestService(context);
+
+  await assert.rejects(
+    () => service.createWorkbenchSubmission({
+      snapshot: {
+        mode: "image",
+        model: "Unknown Browser Model",
+        prompt: { text: "Do not dispatch an unknown model.", tokens: [] },
+        attachments: [],
+        settings: {},
+      },
+      idempotency_key: "browser-unknown-model",
+    }),
+    (error) => error.code === "MODEL_CAPABILITY_UNKNOWN" && error.details.field === "snapshot.model",
+  );
+});
+
+test("rejects a workbench model whose capability belongs to the other media mode", async (context) => {
+  const { service } = await createTestService(context);
+
+  await assert.rejects(
+    () => service.createWorkbenchSubmission({
+      snapshot: {
+        mode: "video",
+        model: "Image 2",
+        prompt: { text: "Do not send an image model as video.", tokens: [] },
+        attachments: [],
+        settings: {},
+      },
+      idempotency_key: "browser-model-mode-mismatch",
+    }),
+    (error) => error.code === "VALIDATION_FAILED" && error.details.field === "snapshot.model",
+  );
 });
 
 test("rejects an unsupported patch path without changing the draft", async (context) => {

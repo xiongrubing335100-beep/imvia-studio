@@ -33,6 +33,11 @@ node_binary=$(resolve_node_binary) || {
   exit 127
 }
 
+# Some plugin installers preserve pnpm's content store but omit the direct
+# dependency links that Node's ESM resolver requires. Repair those links before
+# loading the MCP so a fresh Codex process cannot fail at startup.
+"$node_binary" "$script_directory/ensure-runtime-dependencies.mjs" 1>&2
+
 proxy_mode="${IMVIA_PROXY_MODE:-auto}"
 
 case "$proxy_mode" in

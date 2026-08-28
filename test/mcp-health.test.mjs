@@ -27,7 +27,7 @@ test("starts the independent imvia-studio MCP and responds to imvia_health", asy
   const listed = await client.listTools();
   assert.deepEqual(
     listed.tools.map((tool) => tool.name).sort(),
-    ["imvia_authorize_lovart_probe", "imvia_claim_cost_decision", "imvia_confirm_generation", "imvia_connect_lovart", "imvia_create_iteration", "imvia_create_lovart_project", "imvia_disconnect_lovart", "imvia_execute_workbench_submission", "imvia_follow_up_generation", "imvia_generate", "imvia_get_account_status", "imvia_get_generation", "imvia_get_state", "imvia_health", "imvia_import_result", "imvia_list_lovart_projects", "imvia_list_pending_jobs", "imvia_lovart_status", "imvia_open_workbench", "imvia_patch_workbench", "imvia_prepare_generation", "imvia_probe_lovart_capabilities", "imvia_record_cost_decision", "imvia_select_lovart_project", "imvia_update_account_status", "imvia_update_job", "imvia_wait_for_workbench_submission"],
+    ["imvia_authorize_lovart_probe", "imvia_claim_cost_decision", "imvia_claim_next_workbench_dispatch", "imvia_confirm_generation", "imvia_connect_lovart", "imvia_create_iteration", "imvia_create_lovart_project", "imvia_disconnect_lovart", "imvia_execute_workbench_submission", "imvia_follow_up_generation", "imvia_generate", "imvia_get_account_status", "imvia_get_bridge_status", "imvia_get_generation", "imvia_get_state", "imvia_health", "imvia_heartbeat_conversation_bridge", "imvia_import_result", "imvia_list_lovart_projects", "imvia_list_pending_jobs", "imvia_list_provider_connections", "imvia_list_providers", "imvia_lovart_status", "imvia_mark_dispatch_host_accepted", "imvia_open_workbench", "imvia_patch_workbench", "imvia_prepare_generation", "imvia_probe_lovart_capabilities", "imvia_record_cost_decision", "imvia_register_conversation_bridge", "imvia_release_dispatch_claim", "imvia_select_lovart_project", "imvia_test_provider_connection", "imvia_update_account_status", "imvia_update_job", "imvia_wait_for_workbench_submission"],
   );
 
   const result = await client.callTool({ name: "imvia_health", arguments: {} });
@@ -66,7 +66,7 @@ test("starts the independent imvia-studio MCP and responds to imvia_health", asy
     assert.equal(opened.structuredContent.data.onboarding.state, "failed");
     assert.equal(opened.structuredContent.data.onboarding.code, "PLATFORM_UNSUPPORTED");
   }
-  assert.match(opened.structuredContent.data.workbench_url, /^http:\/\/127\.0\.0\.1:\d+\/workbench\?imvia=live$/);
+  assert.match(opened.structuredContent.data.workbench_url, /^http:\/\/127\.0\.0\.1:\d+\/workbench\?imvia=live&session=[^&]+&bridge_token=[^&]+&submission_cursor=[^&]*$/);
   assert.equal(new URL(opened.structuredContent.data.workbench_url).searchParams.has("lovart"), false);
   assert.equal(new URL(opened.structuredContent.data.workbench_url).searchParams.has("code"), false);
 

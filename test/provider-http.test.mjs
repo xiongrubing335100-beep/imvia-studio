@@ -49,10 +49,15 @@ async function startFixture(context) {
     async read() { return { api_key: "only-in-native-helper" }; }, async clear() { return { status: "setup_required", code: "SETUP_REQUIRED" }; },
   };
   const providerConnectionService = createProviderConnectionService({ connectionStore, credentialService, discoveryService, adapterRegistry });
+  const testerCalls = [];
+  const providerConnectionTester = async ({ connection, credential }) => {
+    testerCalls.push({ connection_id: connection.connection_id, legacy: connection.legacy === true, api_key: credential.api_key });
+    return connection.legacy === true ? { accepted: true, code: "CONNECTED" } : { status: "connected", code: "CONNECTED" };
+  };
   const bridgeService = { async validateSessionToken({ session_id, open_token }) { assert.equal(session_id, "fixture-session"); assert.equal(open_token, "fixture-token"); } };
-  const server = await startHttpServer({ dataDirectory, port: 0, providerRegistry: registry, connectionStore, providerConnectionService, bridgeService });
+  const server = await startHttpServer({ dataDirectory, port: 0, providerRegistry: registry, connectionStore, providerConnectionService, providerCredentialService: credentialService, providerConnectionTester, bridgeService });
   context.after(async () => { await server.close(); await rm(dataDirectory, { recursive: true, force: true }); });
-  return { server, connectionStore };
+  return { server, connectionStore, testerCalls };
 }
 async function sseThroughCompletion(response) {
   const reader = response.body.getReader();
@@ -67,7 +72,7 @@ async function sseThroughCompletion(response) {
 }
 
 test("provider HTTP exposes the modern discovery lifecycle without legacy mappings or credentials", async (context) => {
-  const { server, connectionStore } = await startFixture(context);
+  const { server, connectionStore, testerCalls } = await startFixture(context);
   const legacy = await connectionStore.create({ provider_id: "fixture-api", name: "Legacy", base_url: "https://legacy.example.test", endpoint_mappings: { submit: { path: "/generate" } }, settings: { timeout: 1 } });
   for (const field of ["provider_id", "capabilities", "models", "endpoint_mappings", "settings", "api_key", "secret_key"]) {
     const rejected = await json(await fetch(`${server.url}/api/v1/connections`, { method: "POST", headers: mutationHeaders, body: JSON.stringify({ name: "Rejected", base_url: "api.example.test/v1", [field]: field === "api_key" ? "private" : [] }) }));
@@ -87,6 +92,13 @@ test("provider HTTP exposes the modern discovery lifecycle without legacy mappin
   const eventChunk = await sseThroughCompletion(events);
   assert.match(eventChunk, /"stage":"credential_setup"/u); assert.match(eventChunk, /"stage":"discovering"/u); assert.match(eventChunk, /"stage":"completed"/u);
   for (const event of eventChunk.matchAll(/^data: (.+)$/gmu)) assert.deepEqual(Object.keys(JSON.parse(event[1])).sort(), ["code", "connection_id", "model_count", "stage", "status"]);
+  const testedModern = await json(await fetch(`${server.url}/api/v1/connections/${created.body.data.connection.connection_id}/test`, { method: "POST", headers: mutationHeaders }));
+  const testedLegacy = await json(await fetch(`${server.url}/api/v1/connections/${legacy.connection_id}/test`, { method: "POST", headers: mutationHeaders }));
+  assert.equal(testedModern.body.data.status, "connected"); assert.equal(testedLegacy.body.data.status, "connected");
+  assert.deepEqual(testerCalls, [
+    { connection_id: created.body.data.connection.connection_id, legacy: false, api_key: "only-in-native-helper" },
+    { connection_id: legacy.connection_id, legacy: true, api_key: "only-in-native-helper" },
+  ]);
   const rediscovered = await json(await fetch(`${server.url}/api/v1/connections/${created.body.data.connection.connection_id}/discover`, { method: "POST", headers: mutationHeaders }));
   assert.equal(rediscovered.status, 200); assert.equal(rediscovered.body.data.discovery.status, "connected");
   const refreshed = await json(await fetch(`${server.url}/api/v1/connections/${created.body.data.connection.connection_id}/models/refresh`, { method: "POST", headers: mutationHeaders }));

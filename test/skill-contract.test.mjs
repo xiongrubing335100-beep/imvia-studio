@@ -48,21 +48,47 @@ test("skill hands a workbench button summary to Codex before any Lovart executio
   const text = await readFile(skillUrl, "utf8");
   const normalized = text.replace(/\s+/gu, " ");
   for (const phrase of [
-    "submission_cursor",
-    "imvia_wait_for_workbench_submission",
-    "read and summarize its immutable `snapshot` as the user's message to Codex",
+    "bridge_state",
+    "imvia_register_conversation_bridge",
+    "host `ui/message` channel",
+    "immutable task envelope",
     "imvia_execute_workbench_submission",
-    "The workbench button only hands the summarized form to Codex. It never calls Lovart directly.",
+    "The workbench button only writes an immutable task envelope to the local durable outbox.",
     "Never create a second job with `imvia_generate` for the same workbench submission.",
   ]) assert.ok(normalized.includes(phrase), `missing workbench handoff contract: ${phrase}`);
-  assert.ok(text.indexOf("imvia_wait_for_workbench_submission") < text.indexOf("imvia_execute_workbench_submission"));
+  assert.ok(text.indexOf("imvia_register_conversation_bridge") < text.indexOf("imvia_execute_workbench_submission"));
+});
+
+test("skill discovery routes an explicitly selected IMVIA Studio workbench away from Imvia Layer", async () => {
+  const text = await readFile(skillUrl, "utf8");
+  const description = text.match(/^description:\s*(.+)$/mu)?.[1] ?? "";
+
+  assert.match(description, /^Use when\b/u);
+  assert.match(description, /explicitly (?:selects|@-mentions).*IMVIA Studio/iu);
+  assert.match(description, /open(?:s|ing)?|launch(?:es|ing)?/iu);
+  assert.match(description, /workbench/iu);
+  assert.match(description, /not for Imvia Layer/iu);
+
+  const openingSection = text.slice(text.indexOf("## Open the web workbench"), text.indexOf("## Milestone 5 fixture-only gate"));
+  assert.match(openingSection, /plugin:\/\/imvia-studio@personal/u);
+  assert.match(openingSection, /Never route.*Imvia Layer/iu);
+});
+
+test("skill preserves the friendly external provider boundary", async () => {
+  const text = await readFile(skillUrl, "utf8");
+  for (const phrase of [
+    "API address and API Key",
+    "discovered model catalog",
+    "frozen provider adapter",
+    "Never call or fall back to Lovart for an external provider job",
+  ]) assert.ok(text.includes(phrase), phrase);
 });
 
 test("workbench browser actions only remember project context and queue Codex handoffs", async () => {
   const source = await readFile(new URL("../workbench/dist/assets/imvia-result-workspace.js", import.meta.url), "utf8");
   assert.ok(source.includes("/api/v1/lovart/projects/remember"));
   assert.ok(source.includes("/api/v1/workbench/submissions"));
-  assert.ok(source.includes("任务摘要已发送给 Codex，等待 Codex 处理"));
+  assert.ok(source.includes("任务已保存，等待会话桥发送到当前 Codex 会话"));
   assert.equal(source.includes("/api/v1/generations"), false);
   assert.equal(source.includes("submitLiveGeneration"), false);
 });
@@ -79,4 +105,20 @@ test("orchestration code has no real Lovart transport or credential fallback", a
       assert.equal(source.includes(forbidden), false, `${url.pathname} contains ${forbidden}`);
     }
   }
+});
+
+test("provider verification has a focused fake-provider gate with no credential fixture in its public assertions", async () => {
+  const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(
+    packageJson.scripts["test:providers"],
+    "node --test test/provider-*.test.mjs test/model-catalog.test.mjs test/openai-compatible-images.test.mjs test/workbench-provider-selection.test.mjs test/workbench-provider-ui.test.mjs test/provider-e2e.test.mjs",
+  );
+  const e2e = await readFile(new URL("./provider-e2e.test.mjs", import.meta.url), "utf8");
+  for (const phrase of [
+    "workbench/submissions",
+    "claimNext",
+    "imvia_execute_workbench_submission",
+    "event: job\\.updated",
+    "credential_values",
+  ]) assert.ok(e2e.includes(phrase), phrase);
 });

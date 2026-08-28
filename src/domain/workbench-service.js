@@ -5,7 +5,9 @@ import { JsonStore } from "../persistence/json-store.js";
 import { createCostFingerprint } from "./cost-confirmation.js";
 import { DomainError } from "./errors.js";
 import { assertContinuationParent, normalizeLovartProjectLocator } from "./lovart-project-context.js";
-import { MODEL_CAPABILITIES } from "./model-capabilities.js";
+import { MODEL_CAPABILITIES, assertProviderModelCapability } from "./model-capabilities.js";
+import { normalizeWorkbenchModel } from "../lovart/model-selection.js";
+import { modelRecordDigest } from "../providers/model-catalog.js";
 import { assertLiveSource, assertM5Source, isAllowedM5Source } from "./source-policy.js";
 import { assertExpiryAtOrAfterChecked, assertSourceCheckedAt } from "./timestamps.js";
 
@@ -14,6 +16,8 @@ export { DomainError } from "./errors.js";
 const ALLOWED_PATCH_FIELDS = new Set([
   "mode",
   "model",
+  "provider_id",
+  "connection_id",
   "prompt.text",
   "prompt.tokens",
   "reference_ids",
@@ -28,11 +32,93 @@ const ALLOWED_PATCH_FIELDS = new Set([
 
 const JOB_TRANSITIONS = new Map([
   ["queued_for_agent", new Set(["uploading", "cancelled"])],
-  ["uploading", new Set(["submitted", "failed", "cancelled"])],
+  ["uploading", new Set(["submitted", "awaiting_cost_confirmation", "failed", "cancelled"])],
   ["submitted", new Set(["awaiting_cost_confirmation", "generating", "failed", "cancelled"])],
   ["awaiting_cost_confirmation", new Set(["generating", "declined", "cancelled"])],
   ["generating", new Set(["succeeded", "partially_succeeded", "failed", "cancelled"])],
 ]);
+
+const JOB_STATUS_MESSAGES = Object.freeze({
+  queued_for_agent: "任务已保存，等待会话桥发送到当前 Codex 会话。",
+  uploading: "Codex 已收到，正在准备并上传素材到 Lovart。",
+  submitted: "已提交 Lovart，正在处理中。",
+  awaiting_cost_confirmation: "Lovart 返回了费用确认，等待你的决定。",
+  generating: "Lovart 正在生成，状态会持续同步。",
+  succeeded: "Lovart 已完成生成。",
+  partially_succeeded: "Lovart 已部分完成生成。",
+  failed: "Lovart 处理失败。",
+  cancelled: "任务已取消。",
+  declined: "费用确认已拒绝。",
+});
+
+const PROVIDER_LIVE_SOURCES = new Set([
+  "imvia:provider_upload",
+  "imvia:provider_submit",
+  "imvia:provider_status",
+  "imvia:provider_import",
+  "imvia:provider_confirm",
+]);
+const SECRET_FIELD_NAME = /^(?:credential(?:_|$)|secret(?:_?key)?$|password$|api[_-]?key$|access[_-]?key$|private[_-]?key$|authorization$|bearer(?:_?token)?$|token$|session[_-]?cookie$)/i;
+
+function sanitizeSnapshot(value, secretFieldIds = new Set(), path = "snapshot") {
+  if (Array.isArray(value)) return value.map((item, index) => sanitizeSnapshot(item, secretFieldIds, `${path}.${index}`));
+  if (!value || typeof value !== "object") return value;
+  const output = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (SECRET_FIELD_NAME.test(key) || secretFieldIds.has(key.toLowerCase())) continue;
+    output[key] = sanitizeSnapshot(item, secretFieldIds, `${path}.${key}`);
+  }
+  return output;
+}
+
+function serializeSelectedModel(model) {
+  return {
+    id: model.id,
+    display_name: model.display_name,
+    capabilities: [...model.capabilities],
+    compatibility: model.compatibility,
+    source: "api",
+    raw_index: model.raw_index,
+  };
+}
+
+function freezeExternalModelSelection({ providerRegistry, connection, provider_id, model, mode, field = "snapshot.model" }) {
+  let selected;
+  try {
+    selected = assertProviderModelCapability({ providerRegistry, connection, provider_id, model, mode, field });
+  } catch (error) {
+    throw new DomainError(error.code ?? "VALIDATION_FAILED", error.message, error.details);
+  }
+  const serialized = serializeSelectedModel(selected);
+  return { selected_model: serialized, selected_model_digest: modelRecordDigest(serialized) };
+}
+
+function assertExecutionSource(source) {
+  if (PROVIDER_LIVE_SOURCES.has(source)) return source;
+  return assertLiveSource(source);
+}
+
+function isExecutableProviderJob(job) {
+  return job.direct_generation === true
+    || (job.submission_kind === "workbench_generation" && job.snapshot?.provider_id && job.snapshot.provider_id !== "lovart");
+}
+
+function statusMessageFor(status) {
+  return JOB_STATUS_MESSAGES[status] || "任务状态已更新。";
+}
+
+function normalizeStatusMessage(value, fallbackStatus) {
+  if (typeof value !== "string" || !value.trim()) return statusMessageFor(fallbackStatus);
+  return value.trim().slice(0, 256);
+}
+
+function normalizeProgress(value) {
+  if (value == null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new DomainError("VALIDATION_FAILED", "progress must be an object.", { field: "progress" });
+  }
+  return clone(value);
+}
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -83,6 +169,8 @@ function createInitialState() {
       revision: 0,
       mode: "video",
       model: null,
+      provider_id: "lovart",
+      connection_id: null,
       prompt: { text: "", tokens: [] },
       reference_ids: [],
       settings: {
@@ -113,7 +201,58 @@ function migrateWorkbenchState(state) {
     const migrated = clone(state);
     migrated.lovart_projects ??= [];
     migrated.active_lovart_project_id ??= null;
-    return { state: migrated, changed: !Array.isArray(state.lovart_projects) || !Object.hasOwn(state, "active_lovart_project_id") };
+    const hadStatusMetadata = (state.jobs ?? []).every((job) => Object.hasOwn(job, "status_message") && Object.hasOwn(job, "progress"));
+    let changed = !Array.isArray(state.lovart_projects) || !Object.hasOwn(state, "active_lovart_project_id") || !hadStatusMetadata;
+    for (const draft of migrated.drafts ?? []) {
+      if (!draft.provider_id) {
+        draft.provider_id = "lovart";
+        changed = true;
+      }
+      if (!Object.hasOwn(draft, "connection_id")) {
+        draft.connection_id = null;
+        changed = true;
+      }
+    }
+    for (const job of migrated.jobs ?? []) {
+      job.snapshot ??= {};
+      const sanitizedSnapshot = sanitizeSnapshot(job.snapshot);
+      if (stableJson(sanitizedSnapshot) !== stableJson(job.snapshot)) {
+        job.snapshot = sanitizedSnapshot;
+        changed = true;
+      }
+      if (!job.provider_id) {
+        job.provider_id = job.snapshot.provider_id ?? "lovart";
+        changed = true;
+      }
+      if (!job.snapshot.provider_id) {
+        job.snapshot.provider_id = job.provider_id;
+        changed = true;
+      }
+      if (!Object.hasOwn(job, "connection_id")) {
+        job.connection_id = job.snapshot.connection_id ?? null;
+        changed = true;
+      }
+      if (!Object.hasOwn(job.snapshot, "connection_id")) {
+        job.snapshot.connection_id = job.connection_id;
+        changed = true;
+      }
+      if (!Object.hasOwn(job.snapshot, "connection_config_revision")) {
+        job.snapshot.connection_config_revision = null;
+        changed = true;
+      }
+      for (const field of ["model_catalog_revision", "model_catalog_digest", "adapter_id", "adapter_version", "selected_model", "selected_model_digest"]) {
+        if (!Object.hasOwn(job.snapshot, field)) {
+          job.snapshot[field] = null;
+          changed = true;
+        }
+      }
+      if (!job.status_message || (job.status === "queued_for_agent" && ["已发送给 Codex，等待处理。", "已进入 Codex 会话桥，等待 Codex 接收。"].includes(job.status_message))) {
+        job.status_message = statusMessageFor(job.status);
+        changed = true;
+      }
+      job.progress ??= null;
+    }
+    return { state: migrated, changed };
   }
   if (state?.schema_version !== "1") {
     throw new DomainError("STATE_MIGRATION_FAILED", "The local workbench state schema is unsupported.", { schema_version: state?.schema_version ?? null });
@@ -141,6 +280,21 @@ function migrateWorkbenchState(state) {
   migrated.schema_version = "2";
   migrated.lovart_projects = projects;
   migrated.active_lovart_project_id = active;
+  for (const draft of migrated.drafts ?? []) {
+    draft.provider_id ??= "lovart";
+    draft.connection_id ??= null;
+  }
+  for (const job of migrated.jobs ?? []) {
+    job.snapshot ??= {};
+    job.snapshot = sanitizeSnapshot(job.snapshot);
+    job.provider_id ??= job.snapshot.provider_id ?? "lovart";
+    job.connection_id ??= job.snapshot.connection_id ?? null;
+    job.snapshot.provider_id ??= job.provider_id;
+    job.snapshot.connection_id ??= job.connection_id;
+    job.snapshot.connection_config_revision ??= null;
+    job.status_message ??= statusMessageFor(job.status);
+    job.progress ??= null;
+  }
   migrated.updated_at = isoNow();
   return { state: migrated, changed: true };
 }
@@ -178,6 +332,8 @@ function costFingerprintForJob(job) {
     unit: job.estimated_cost.unit,
     checked_at: job.estimated_cost.checked_at,
     source: job.estimated_cost.source,
+    unknown: job.estimated_cost.unknown === true,
+    provider_id: job.provider_id ?? job.snapshot?.provider_id ?? null,
   });
 }
 
@@ -253,21 +409,27 @@ function validatePatch(patch) {
   if ("prompt.text" in patch && typeof patch["prompt.text"] !== "string") {
     throw new DomainError("VALIDATION_FAILED", "prompt.text must be a string.", { field: "prompt.text" });
   }
+  if ("provider_id" in patch && (typeof patch.provider_id !== "string" || !patch.provider_id.trim())) {
+    throw new DomainError("VALIDATION_FAILED", "provider_id must be a non-empty string.", { field: "provider_id" });
+  }
+  if ("connection_id" in patch && patch.connection_id !== null && (typeof patch.connection_id !== "string" || !patch.connection_id.trim())) {
+    throw new DomainError("VALIDATION_FAILED", "connection_id must be null or a non-empty string.", { field: "connection_id" });
+  }
   if ("settings.duration_seconds" in patch && patch["settings.duration_seconds"] !== null && (!Number.isInteger(patch["settings.duration_seconds"]) || patch["settings.duration_seconds"] <= 0)) {
     throw new DomainError("VALIDATION_FAILED", "settings.duration_seconds must be a positive integer.", { field: "settings.duration_seconds" });
   }
 }
 
-function validateDraftForPreparation(state, draft) {
-  if (draft.model) {
-    const capability = MODEL_CAPABILITIES.get(draft.model);
-    if (!capability) {
-      throw new DomainError("MODEL_CAPABILITY_UNKNOWN", "The selected model is absent from the local capability table.", { field: "model", model: draft.model });
-    }
-    if (capability.mode !== draft.mode) {
-      throw new DomainError("VALIDATION_FAILED", "The selected model does not support this creation mode.", { field: "model", model: draft.model, mode: draft.mode });
-    }
-    if (draft.settings.duration_seconds != null && capability.durations && !capability.durations.includes(draft.settings.duration_seconds)) {
+function validateDraftForPreparation(state, draft, { providerRegistry = null } = {}) {
+  const providerId = draft.provider_id ?? "lovart";
+  // External selections are validated against the enabled connection's immutable
+  // catalog below in freezeProviderSelection. Draft validation cannot safely use
+  // provider descriptor models because those are only legacy defaults.
+  if (draft.model && providerId === "lovart") {
+    try { assertProviderModelCapability({ providerRegistry, provider_id: providerId, model: draft.model, mode: draft.mode }); }
+    catch (error) { throw new DomainError(error.code ?? "VALIDATION_FAILED", error.message, error.details); }
+    const capability = providerId === "lovart" ? MODEL_CAPABILITIES.get(draft.model) : null;
+    if (draft.settings.duration_seconds != null && capability?.durations && !capability.durations.includes(draft.settings.duration_seconds)) {
       throw new DomainError("VALIDATION_FAILED", "The selected model does not support the requested duration.", {
         field: "settings.duration_seconds",
         model: draft.model,
@@ -299,6 +461,33 @@ function validateDraftForPreparation(state, draft) {
   return { warnings: [] };
 }
 
+function normalizeWorkbenchCountSettings(mode, value) {
+  const settings = value && typeof value === "object" && !Array.isArray(value) ? clone(value) : {};
+  if (mode !== "image") return settings;
+  const countMode = settings.count_mode;
+  const count = settings.count;
+  if (countMode == null) {
+    if (count == null) return { ...settings, count_mode: "auto", count: null };
+    if (!Number.isInteger(count) || count <= 0) {
+      throw new DomainError("VALIDATION_FAILED", "snapshot.settings.count must be a positive integer for a fixed image count.", { field: "snapshot.settings.count" });
+    }
+    return { ...settings, count_mode: "fixed", count };
+  }
+  if (countMode === "auto") {
+    if (count != null) {
+      throw new DomainError("VALIDATION_FAILED", "An Auto image count cannot also force a numeric count.", { field: "snapshot.settings.count" });
+    }
+    return { ...settings, count_mode: "auto", count: null };
+  }
+  if (countMode === "fixed") {
+    if (!Number.isInteger(count) || count <= 0) {
+      throw new DomainError("VALIDATION_FAILED", "snapshot.settings.count must be a positive integer for a fixed image count.", { field: "snapshot.settings.count" });
+    }
+    return { ...settings, count_mode: "fixed", count };
+  }
+  throw new DomainError("VALIDATION_FAILED", "snapshot.settings.count_mode must be auto or fixed.", { field: "snapshot.settings.count_mode" });
+}
+
 function publish(listeners, event) {
   for (const listener of listeners) listener(clone(event));
 }
@@ -324,14 +513,87 @@ function summarize(state, { include = [] } = {}) {
   return response;
 }
 
-export function createWorkbenchService({ dataDirectory }) {
+export function createWorkbenchService({ dataDirectory, providerRegistry = null, connectionStore = null } = {}) {
   if (!dataDirectory) throw new Error("dataDirectory is required.");
   const store = new JsonStore({ dataDirectory, createInitialState, migrateState: migrateWorkbenchState });
   const listeners = new Set();
 
+  async function freezeProviderSelection(snapshot) {
+    const provider_id = typeof snapshot.provider_id === "string" && snapshot.provider_id.trim()
+      ? snapshot.provider_id.trim()
+      : "lovart";
+    const connection_id = snapshot.connection_id ?? null;
+    if (provider_id === "lovart") {
+      if (connection_id !== null) {
+        throw new DomainError("VALIDATION_FAILED", "Lovart jobs do not use a generic provider connection.", { field: "connection_id" });
+      }
+      return {
+        provider_id, provider_label: "Lovart", connection_id: null, connection_config_revision: null,
+        model_catalog_revision: null, model_catalog_digest: null, adapter_id: null, adapter_version: null,
+        selected_model: null, selected_model_digest: null, secret_field_ids: new Set(),
+      };
+    }
+    if (!providerRegistry || !connectionStore?.get) {
+      throw new DomainError("VALIDATION_FAILED", "A provider registry and connection store are required for external providers.", { field: "provider_id", provider_id });
+    }
+    const descriptor = providerRegistry.get(provider_id);
+    if (connection_id === null || typeof connection_id !== "string" || !connection_id.trim()) {
+      throw new DomainError("VALIDATION_FAILED", "connection_id is required for an external provider.", { field: "connection_id" });
+    }
+    const connection = await connectionStore.get(connection_id);
+    const usableLegacyConnection = connection?.legacy === true && descriptor.kind === "generic_rest";
+    if (!connection || connection.provider_id !== descriptor.id || connection.enabled !== true || (!usableLegacyConnection && connection.status !== "connected")) {
+      throw new DomainError("CONNECTION_UNAVAILABLE", "The selected provider connection is unavailable.", { provider_id, connection_id });
+    }
+    if (typeof snapshot.model !== "string" || !snapshot.model.trim()) {
+      throw new DomainError("VALIDATION_FAILED", "An external provider model is required.", { field: "snapshot.model" });
+    }
+    const frozenModel = usableLegacyConnection
+      ? { selected_model: null, selected_model_digest: null }
+      : freezeExternalModelSelection({ providerRegistry, connection, provider_id, model: snapshot.model.trim(), mode: snapshot.mode });
+    return {
+      provider_id,
+      provider_label: descriptor.display_name,
+      legacy: usableLegacyConnection,
+      connection_id: connection.connection_id,
+      connection_config_revision: connection.config_revision,
+      model_catalog_revision: usableLegacyConnection ? null : connection.model_catalog_revision,
+      model_catalog_digest: usableLegacyConnection ? null : connection.model_catalog_digest,
+      adapter_id: usableLegacyConnection ? null : connection.adapter_id,
+      adapter_version: usableLegacyConnection ? null : connection.adapter_version,
+      ...frozenModel,
+      secret_field_ids: new Set((connection.provider_descriptor?.credential_fields ?? []).map((field) => field?.id?.toLowerCase()).filter(Boolean)),
+    };
+  }
+
   return {
     async getState(options) {
       return summarize(await store.read(), options);
+    },
+
+    async renameProject({ project_id, name }) {
+      if (typeof project_id !== "string" || !project_id.trim()) {
+        throw new DomainError("VALIDATION_FAILED", "project_id is required.", { field: "project_id" });
+      }
+      if (typeof name !== "string" || !name.trim()) {
+        throw new DomainError("VALIDATION_FAILED", "Project name is required.", { field: "name" });
+      }
+      const normalizedName = name.trim();
+      if (normalizedName.length > 120) {
+        throw new DomainError("VALIDATION_FAILED", "Project name is too long.", { field: "name", maximum_length: 120 });
+      }
+      const result = await store.update((state) => {
+        const project = state.projects.find((item) => item.id === project_id.trim());
+        if (!project) throw new DomainError("NOT_FOUND", "The local project does not exist.", { project_id: project_id.trim() });
+        const now = isoNow();
+        project.name = normalizedName;
+        project.updated_at = now;
+        state.updated_at = now;
+        state.audit_events.push({ id: randomUUID(), occurred_at: now, actor: "workbench_user", reason: "Local project renamed", changed_fields: ["projects.name"] });
+        return { project: clone(project) };
+      });
+      publish(listeners, { type: "project.updated", data: result.project });
+      return result;
     },
 
     async getLovartProjects() {
@@ -548,7 +810,8 @@ export function createWorkbenchService({ dataDirectory }) {
       return store.update((state) => {
         const existing = state.idempotency[idempotency_key];
         const comparableActivation = stableJson(activation);
-        const comparableSnapshot = stableJson(snapshot);
+        const safeSnapshot = { ...sanitizeSnapshot(snapshot), provider_id: "lovart", connection_id: null, connection_config_revision: null };
+        const comparableSnapshot = stableJson(safeSnapshot);
         if (existing) {
           if (
             existing.operation !== "direct_generation"
@@ -564,7 +827,9 @@ export function createWorkbenchService({ dataDirectory }) {
           project_id: currentProject(state).id,
           draft_id: null,
           draft_revision: null,
-          snapshot: { ...clone(snapshot), lovart_project_id: normalized.project_id, activation: clone(activation) },
+          snapshot: { ...safeSnapshot, lovart_project_id: normalized.project_id, activation: clone(activation) },
+          provider_id: "lovart",
+          connection_id: null,
           status: "queued_for_agent",
           attempt: 1,
           idempotency_key,
@@ -578,6 +843,8 @@ export function createWorkbenchService({ dataDirectory }) {
           estimated_cost: null,
           cost_decisions: [],
           error: null,
+          status_message: statusMessageFor("queued_for_agent"),
+          progress: null,
           created_at: now,
           updated_at: now,
         };
@@ -602,17 +869,53 @@ export function createWorkbenchService({ dataDirectory }) {
         throw new DomainError("VALIDATION_FAILED", "A non-empty prompt is required before sending a task to Codex.", { field: "snapshot.prompt.text" });
       }
       if (!["image", "video"].includes(snapshot.mode)) throw new DomainError("VALIDATION_FAILED", "Workbench mode must be image or video.", { field: "snapshot.mode" });
+      const selection = await freezeProviderSelection(snapshot);
+      const normalizedSnapshot = sanitizeSnapshot(snapshot, selection.secret_field_ids);
+      normalizedSnapshot.provider_id = selection.provider_id;
+      normalizedSnapshot.provider_label = selection.provider_label;
+      normalizedSnapshot.connection_id = selection.connection_id;
+      normalizedSnapshot.connection_config_revision = selection.connection_config_revision;
+      normalizedSnapshot.model_catalog_revision = selection.model_catalog_revision;
+      normalizedSnapshot.model_catalog_digest = selection.model_catalog_digest;
+      normalizedSnapshot.adapter_id = selection.adapter_id;
+      normalizedSnapshot.adapter_version = selection.adapter_version;
+      normalizedSnapshot.selected_model = selection.selected_model;
+      normalizedSnapshot.selected_model_digest = selection.selected_model_digest;
+      normalizedSnapshot.settings = normalizeWorkbenchCountSettings(snapshot.mode, normalizedSnapshot.settings);
+      if (snapshot.model != null) {
+        if (typeof snapshot.model !== "string" || !snapshot.model.trim()) {
+          throw new DomainError("VALIDATION_FAILED", "Workbench model must be a non-empty string.", { field: "snapshot.model" });
+        }
+        const normalizedModel = selection.provider_id === "lovart" ? normalizeWorkbenchModel(snapshot.model) : snapshot.model.trim();
+        try {
+          normalizedSnapshot.model = selection.provider_id === "lovart"
+            ? assertProviderModelCapability({ providerRegistry, provider_id: selection.provider_id, model: normalizedModel, mode: snapshot.mode, field: "snapshot.model" })
+            : selection.legacy === true ? normalizedModel : selection.selected_model.id;
+        } catch (error) {
+          throw new DomainError(error.code ?? "VALIDATION_FAILED", error.message, error.details);
+        }
+      }
       if (snapshot.attachments != null && (!Array.isArray(snapshot.attachments) || snapshot.attachments.some((item) => typeof item !== "string" || !item))) {
         throw new DomainError("VALIDATION_FAILED", "snapshot.attachments must contain only non-empty strings.", { field: "snapshot.attachments" });
       }
       const activation = { source: "workbench_action" };
-      return store.update((state) => {
+      const result = await store.update((state) => {
         const project = currentProject(state);
         const selectedProjectId = project.lovart_project_id ?? state.active_lovart_project_id ?? null;
         const frozenSnapshot = {
-          ...clone(snapshot),
-          prompt: clone(snapshot.prompt),
-          attachments: clone(snapshot.attachments ?? []),
+          ...normalizedSnapshot,
+          prompt: clone(normalizedSnapshot.prompt),
+          attachments: clone(normalizedSnapshot.attachments ?? []),
+          provider_id: selection.provider_id,
+          provider_label: selection.provider_label,
+          connection_id: selection.connection_id,
+          connection_config_revision: selection.connection_config_revision,
+          model_catalog_revision: selection.model_catalog_revision,
+          model_catalog_digest: selection.model_catalog_digest,
+          adapter_id: selection.adapter_id,
+          adapter_version: selection.adapter_version,
+          selected_model: selection.selected_model,
+          selected_model_digest: selection.selected_model_digest,
           lovart_project_id: selectedProjectId,
           activation: clone(activation),
         };
@@ -631,6 +934,9 @@ export function createWorkbenchService({ dataDirectory }) {
           draft_id: null,
           draft_revision: null,
           snapshot: frozenSnapshot,
+          provider_id: selection.provider_id,
+          provider_label: selection.provider_label,
+          connection_id: selection.connection_id,
           submission_kind: "workbench_generation",
           status: "queued_for_agent",
           attempt: 1,
@@ -645,6 +951,8 @@ export function createWorkbenchService({ dataDirectory }) {
           estimated_cost: null,
           cost_decisions: [],
           error: null,
+          status_message: statusMessageFor("queued_for_agent"),
+          progress: null,
           created_at: now,
           updated_at: now,
         };
@@ -654,11 +962,23 @@ export function createWorkbenchService({ dataDirectory }) {
         state.audit_events.push({ id: randomUUID(), occurred_at: now, actor: "workbench_action", reason: "Workbench task sent to Codex", changed_fields: ["jobs", "idempotency"] });
         return { job: clone(job), idempotent: false };
       });
+      publish(listeners, {
+        type: "job.updated",
+        occurred_at: isoNow(),
+        data: {
+          job_id: result.job.id,
+          status: result.job.status,
+          attempt: result.job.attempt,
+          status_message: result.job.status_message,
+          progress: result.job.progress,
+        },
+      });
+      return result;
     },
 
     async activateWorkbenchSubmission({ job_id, lovart_project_id }) {
       const normalized = normalizeLovartProjectLocator(lovart_project_id);
-      return store.update((state) => {
+      const result = await store.update((state) => {
         const job = findJob(state, job_id);
         if (job.submission_kind !== "workbench_generation" || job.activation?.source !== "workbench_action") {
           throw new DomainError("VALIDATION_FAILED", "The requested job is not a workbench submission.", { job_id });
@@ -671,11 +991,25 @@ export function createWorkbenchService({ dataDirectory }) {
         const now = isoNow();
         job.direct_generation = true;
         job.lovart_project_id = normalized.project_id;
+        job.status_message = "Codex 已收到任务，正在准备调用 Lovart。";
+        job.progress = { phase: "accepted", status: "queued_for_agent" };
         job.updated_at = now;
         state.updated_at = now;
         state.audit_events.push({ id: randomUUID(), occurred_at: now, actor: "imvia:workbench_handoff", reason: "Codex accepted workbench task for Lovart execution", changed_fields: ["direct_generation", "lovart_project_id"] });
         return { job: clone(job), idempotent: false };
       });
+      publish(listeners, {
+        type: "job.updated",
+        occurred_at: isoNow(),
+        data: {
+          job_id: result.job.id,
+          status: result.job.status,
+          attempt: result.job.attempt,
+          status_message: result.job.status_message,
+          progress: result.job.progress,
+        },
+      });
+      return result;
     },
 
     async createFollowUpGenerationJob({ parent_job_id, artifact_id, instruction, activation_source, idempotency_key }) {
@@ -746,6 +1080,8 @@ export function createWorkbenchService({ dataDirectory }) {
           estimated_cost: null,
           cost_decisions: [],
           error: null,
+          status_message: statusMessageFor("queued_for_agent"),
+          progress: null,
           created_at: now,
           updated_at: now,
         };
@@ -765,17 +1101,26 @@ export function createWorkbenchService({ dataDirectory }) {
       source,
       source_checked_at,
       lovart_thread_id,
+      provider_task_id,
+      provider_cost,
       estimated_cost,
       cost_decision_id,
       confirmation_evidence,
       error,
+      status_message,
+      progress,
     }) {
-      assertLiveSource(source);
+      assertExecutionSource(source);
       if (!Number.isInteger(attempt) || attempt < 1) throw new DomainError("VALIDATION_FAILED", "attempt must be a positive integer.", { field: "attempt" });
+      const normalizedStatusMessage = normalizeStatusMessage(status_message, next_status);
+      const normalizedProgress = normalizeProgress(progress);
       const isCostTransition = expected_status === "submitted" && next_status === "awaiting_cost_confirmation";
       let canonicalCostCheckedAt = null;
       if (isCostTransition) {
-        if (!estimated_cost || typeof estimated_cost !== "object" || Array.isArray(estimated_cost) || !Number.isFinite(estimated_cost.amount) || estimated_cost.amount < 0 || typeof estimated_cost.unit !== "string" || !estimated_cost.unit) {
+        const unknownCost = estimated_cost?.unknown === true;
+        if (!estimated_cost || typeof estimated_cost !== "object" || Array.isArray(estimated_cost) || (unknownCost
+          ? estimated_cost.amount != null || estimated_cost.unit != null
+          : !Number.isFinite(estimated_cost.amount) || estimated_cost.amount < 0 || typeof estimated_cost.unit !== "string" || !estimated_cost.unit)) {
           throw new DomainError("VALIDATION_FAILED", "A complete sourced cost is required for the awaiting-cost transition.", { field: "estimated_cost" });
         }
         canonicalCostCheckedAt = assertSourceCheckedAt(source_checked_at, { field: "source_checked_at" });
@@ -789,15 +1134,23 @@ export function createWorkbenchService({ dataDirectory }) {
       if (!isConfirmationSuccess && (cost_decision_id != null || confirmation_evidence != null)) {
         throw new DomainError("VALIDATION_FAILED", "Confirmation evidence is not valid for this job transition.", { field: "confirmation_evidence" });
       }
+      if (provider_task_id != null && (typeof provider_task_id !== "string" || !provider_task_id)) {
+        throw new DomainError("VALIDATION_FAILED", "provider_task_id must be a non-empty string.", { field: "provider_task_id" });
+      }
+      if (provider_cost != null && (!provider_cost || typeof provider_cost !== "object" || Array.isArray(provider_cost) || !["known_free", "pending", "unknown"].includes(provider_cost.status))) {
+        throw new DomainError("VALIDATION_FAILED", "provider_cost is invalid.", { field: "provider_cost" });
+      }
       const result = await store.update((state) => {
         const job = findJob(state, job_id);
-        if (!job.direct_generation) throw new DomainError("VALIDATION_FAILED", "The requested job is not a direct Lovart job.", { job_id });
+        if (!isExecutableProviderJob(job)) throw new DomainError("VALIDATION_FAILED", "The requested job is not an executable provider job.", { job_id });
         if (job.status !== expected_status || job.attempt !== attempt) throw statusConflict(job, "The live job status or attempt changed.", { expected_status, expected_attempt: attempt });
         if (!JOB_TRANSITIONS.get(job.status)?.has(next_status)) throw statusConflict(job, "The requested live job transition is not allowed.", { next_status });
         const confirmationDecision = isConfirmationSuccess ? claimedDecisionForConfirmation(job, { cost_decision_id }) : null;
         if (isCostTransition) {
           if (job.estimated_cost != null) throw new DomainError("COST_CONFIRMATION_CONFLICT", "The sourced cost is already recorded and cannot be replaced.", { job_id, attempt });
-          job.estimated_cost = { amount: estimated_cost.amount, unit: estimated_cost.unit, source, checked_at: canonicalCostCheckedAt };
+          job.estimated_cost = estimated_cost.unknown === true
+            ? { amount: null, unit: null, unknown: true, source, checked_at: canonicalCostCheckedAt }
+            : { amount: estimated_cost.amount, unit: estimated_cost.unit, source, checked_at: canonicalCostCheckedAt };
         }
         if (lovart_thread_id != null) {
           if (typeof lovart_thread_id !== "string" || !lovart_thread_id) throw new DomainError("VALIDATION_FAILED", "lovart_thread_id must be a non-empty string.", { field: "lovart_thread_id" });
@@ -805,16 +1158,69 @@ export function createWorkbenchService({ dataDirectory }) {
           job.lovart_thread_id ??= lovart_thread_id;
           job.lovart_thread_source ??= source;
         }
+        if (provider_task_id != null) {
+          if (job.provider_task_id && job.provider_task_id !== provider_task_id) throw statusConflict(job, "The provider job is already linked to a different provider task.", { provider_task_id: job.provider_task_id });
+          job.provider_task_id ??= provider_task_id;
+        }
+        if (provider_cost != null) job.provider_cost = clone(provider_cost);
         const now = isoNow();
         if (confirmationDecision) confirmationDecision.confirmation = { status: "succeeded", source, recorded_at: now };
         job.status = next_status;
+        job.status_message = normalizedStatusMessage;
+        job.progress = normalizedProgress;
         job.error = error == null ? job.error : { ...clone(error), source };
         job.updated_at = now;
         state.updated_at = now;
-        state.audit_events.push({ id: randomUUID(), occurred_at: now, actor: source, reason: `Live job status: ${expected_status} -> ${next_status}`, changed_fields: ["status", ...(isCostTransition ? ["estimated_cost"] : []), ...(lovart_thread_id != null ? ["lovart_thread_id"] : []), ...(confirmationDecision ? ["cost_decisions"] : [])] });
+        state.audit_events.push({ id: randomUUID(), occurred_at: now, actor: source, reason: `Live job status: ${expected_status} -> ${next_status}`, changed_fields: ["status", ...(isCostTransition ? ["estimated_cost"] : []), ...(lovart_thread_id != null ? ["lovart_thread_id"] : []), ...(provider_task_id != null ? ["provider_task_id"] : []), ...(provider_cost != null ? ["provider_cost"] : []), ...(confirmationDecision ? ["cost_decisions"] : [])] });
         return { job: clone(job) };
       });
-      publish(listeners, { type: "job.updated", occurred_at: isoNow(), data: { job_id: result.job.id, status: result.job.status, attempt: result.job.attempt } });
+      publish(listeners, {
+        type: "job.updated",
+        occurred_at: isoNow(),
+        data: {
+          job_id: result.job.id,
+          status: result.job.status,
+          attempt: result.job.attempt,
+          status_message: result.job.status_message,
+          progress: result.job.progress,
+        },
+      });
+      return result;
+    },
+
+    async updateLiveJobProgress({ job_id, expected_status, attempt, source, status_message, progress, retry_state = null }) {
+      assertExecutionSource(source);
+      if (!Number.isInteger(attempt) || attempt < 1) throw new DomainError("VALIDATION_FAILED", "attempt must be a positive integer.", { field: "attempt" });
+      if (typeof expected_status !== "string" || !JOB_TRANSITIONS.has(expected_status)) throw new DomainError("VALIDATION_FAILED", "expected_status is invalid.", { field: "expected_status" });
+      const normalizedStatusMessage = normalizeStatusMessage(status_message, expected_status);
+      const normalizedProgress = normalizeProgress(progress);
+      if (retry_state != null && !["automatic", "manual"].includes(retry_state)) {
+        throw new DomainError("VALIDATION_FAILED", "retry_state is invalid.", { field: "retry_state" });
+      }
+      const result = await store.update((state) => {
+        const job = findJob(state, job_id);
+        if (!isExecutableProviderJob(job)) throw new DomainError("VALIDATION_FAILED", "The requested job is not an executable provider job.", { job_id });
+        if (job.status !== expected_status || job.attempt !== attempt) throw statusConflict(job, "The live job status or attempt changed.", { expected_status, expected_attempt: attempt });
+        const now = isoNow();
+        job.status_message = normalizedStatusMessage;
+        job.progress = normalizedProgress;
+        if (retry_state != null) job.retry_state = retry_state;
+        job.updated_at = now;
+        state.updated_at = now;
+        state.audit_events.push({ id: randomUUID(), occurred_at: now, actor: source, reason: "Live job progress updated", changed_fields: ["status_message", "progress", ...(retry_state != null ? ["retry_state"] : [])] });
+        return { job: clone(job) };
+      });
+      publish(listeners, {
+        type: "job.progress",
+        occurred_at: isoNow(),
+        data: {
+          job_id: result.job.id,
+          status: result.job.status,
+          attempt: result.job.attempt,
+          status_message: result.job.status_message,
+          progress: result.job.progress,
+        },
+      });
       return result;
     },
 
@@ -822,7 +1228,7 @@ export function createWorkbenchService({ dataDirectory }) {
       if (!idempotency_key || typeof idempotency_key !== "string") {
         throw new DomainError("VALIDATION_FAILED", "idempotency_key is required.");
       }
-      return store.update((state) => {
+      return store.update(async (state) => {
         const existing = state.idempotency[idempotency_key];
         if (existing) {
           if (existing.operation !== "prepare_generation" || existing.draft_id !== draft_id) {
@@ -839,17 +1245,43 @@ export function createWorkbenchService({ dataDirectory }) {
         if (!draft.prompt.text.trim()) {
           throw new DomainError("VALIDATION_FAILED", "A non-empty prompt is required before preparing a task.", { field: "prompt.text" });
         }
-        const validation = validateDraftForPreparation(state, draft);
+        const validation = validateDraftForPreparation(state, draft, { providerRegistry });
+        const selection = await freezeProviderSelection(draft);
         const now = isoNow();
+        const localProject = state.projects.find((item) => item.id === draft.project_id);
+        const selectedProjectId = localProject?.lovart_project_id ?? state.active_lovart_project_id ?? null;
+        const activation = { source: "workbench_action" };
+        const frozenSnapshot = {
+          ...sanitizeSnapshot(draft, selection.secret_field_ids),
+          provider_id: selection.provider_id,
+          provider_label: selection.provider_label,
+          connection_id: selection.connection_id,
+          connection_config_revision: selection.connection_config_revision,
+          model_catalog_revision: selection.model_catalog_revision,
+          model_catalog_digest: selection.model_catalog_digest,
+          adapter_id: selection.adapter_id,
+          adapter_version: selection.adapter_version,
+          selected_model: selection.selected_model,
+          selected_model_digest: selection.selected_model_digest,
+          lovart_project_id: selectedProjectId,
+          activation,
+        };
         const job = {
           id: randomUUID(),
           project_id: draft.project_id,
           draft_id: draft.id,
           draft_revision: draft.revision,
-          snapshot: clone(draft),
+          snapshot: frozenSnapshot,
+          provider_id: selection.provider_id,
+          provider_label: selection.provider_label,
+          connection_id: selection.connection_id,
+          submission_kind: "workbench_generation",
           status: "queued_for_agent",
           attempt: 1,
           idempotency_key,
+          direct_generation: false,
+          activation,
+          lovart_project_id: selectedProjectId,
           lovart_thread_id: draft.iteration_context?.lovart_thread_id ?? null,
           lovart_thread_source: draft.iteration_context?.lovart_thread_source ?? null,
           parent_job_id: draft.iteration_context?.source_job_id ?? null,
@@ -857,6 +1289,8 @@ export function createWorkbenchService({ dataDirectory }) {
           estimated_cost: null,
           cost_decisions: [],
           error: null,
+          status_message: statusMessageFor("queued_for_agent"),
+          progress: null,
           created_at: now,
           updated_at: now,
         };
@@ -884,8 +1318,12 @@ export function createWorkbenchService({ dataDirectory }) {
       cost_decision_id,
       confirmation_evidence,
       error,
+      status_message,
+      progress,
     }) {
       assertFixtureSource(source);
+      const normalizedStatusMessage = normalizeStatusMessage(status_message, next_status);
+      const normalizedProgress = normalizeProgress(progress);
       const isCostTransition = expected_status === "submitted" && next_status === "awaiting_cost_confirmation";
       let canonicalCostCheckedAt = null;
       if (isCostTransition) {
@@ -966,6 +1404,8 @@ export function createWorkbenchService({ dataDirectory }) {
           };
         }
         job.status = next_status;
+        job.status_message = normalizedStatusMessage;
+        job.progress = normalizedProgress;
         job.error = error == null ? job.error : { ...clone(error), source };
         job.updated_at = now;
         state.updated_at = now;
@@ -983,7 +1423,17 @@ export function createWorkbenchService({ dataDirectory }) {
         });
         return { job: clone(job) };
       });
-      publish(listeners, { type: "job.updated", occurred_at: isoNow(), data: { job_id: result.job.id, status: result.job.status, attempt: result.job.attempt } });
+      publish(listeners, {
+        type: "job.updated",
+        occurred_at: isoNow(),
+        data: {
+          job_id: result.job.id,
+          status: result.job.status,
+          attempt: result.job.attempt,
+          status_message: result.job.status_message,
+          progress: result.job.progress,
+        },
+      });
       return result;
     },
 
@@ -1033,10 +1483,18 @@ export function createWorkbenchService({ dataDirectory }) {
         const job = findJob(state, job_id);
         assertCurrentCost(job, { attempt, cost_fingerprint });
         job.cost_decisions ??= [];
-        if (job.cost_decisions.some((item) => item.consumed_at == null)) {
+        const pendingDecision = job.cost_decisions.find((item) => item.consumed_at == null);
+        if (pendingDecision?.confirmation?.status === "provider_pending") {
+          throw new DomainError("STATUS_CONFLICT", "A provider confirmation is already in progress for this cost decision.", { job_id, attempt, decision_id: pendingDecision.decision_id });
+        }
+        if (pendingDecision && !(decision === "declined" && pendingDecision.decision === "accepted")) {
           throw new DomainError("COST_CONFIRMATION_CONFLICT", "An unconsumed cost decision already exists.", { job_id, attempt });
         }
         const now = isoNow();
+        if (pendingDecision) {
+          pendingDecision.consumed_at = now;
+          pendingDecision.confirmation = { status: "superseded", source: "user:current_session", recorded_at: now };
+        }
         const record = { decision_id: randomUUID(), job_id, attempt, decision, cost_fingerprint, source, recorded_at: now, consumed_at: null, confirmation: null };
         job.cost_decisions.push(record);
         if (decision === "declined") job.status = "declined";
@@ -1058,6 +1516,121 @@ export function createWorkbenchService({ dataDirectory }) {
       });
     },
 
+    async awaitProviderCostDecision({ job_id, attempt, estimate, resume_status = "uploading" }) {
+      const unknown = estimate?.status === "unknown";
+      const amount = estimate?.amount;
+      const unit = estimate?.unit;
+      if (!estimate || typeof estimate !== "object" || Array.isArray(estimate) || (unknown
+        ? amount != null || unit != null
+        : estimate.status !== "pending" || !Number.isFinite(amount) || amount <= 0 || typeof unit !== "string" || !unit)) {
+        throw new DomainError("VALIDATION_FAILED", "A non-zero or unknown provider estimate is required.", { field: "estimate" });
+      }
+      if (resume_status !== "uploading") throw new DomainError("VALIDATION_FAILED", "Provider cost confirmation may resume only before submission.", { field: "resume_status" });
+      const checkedAt = isoNow();
+      const result = await store.update((state) => {
+        const job = findJob(state, job_id);
+        if (job.status !== "uploading" || job.attempt !== attempt) throw statusConflict(job, "The provider job is no longer waiting to submit.", { expected_status: "uploading", expected_attempt: attempt });
+        if (job.pre_submit_cost_authorization?.used_at != null) {
+          throw new DomainError("COST_CONFIRMATION_CONFLICT", "A cost authorization cannot be replayed for another provider submission.", { job_id, attempt });
+        }
+        const now = isoNow();
+        job.estimated_cost = unknown
+          ? { amount: null, unit: null, unknown: true, source: "imvia:provider_upload", checked_at: checkedAt }
+          : { amount, unit, source: "imvia:provider_upload", checked_at: checkedAt };
+        job.provider_cost = unknown ? { status: "unknown", amount: null, unit: null } : { status: "pending", amount, unit };
+        job.pre_submit_cost_authorization = null;
+        job.status = "awaiting_cost_confirmation";
+        job.status_message = "外部提供方费用待确认，尚未提交请求。";
+        job.progress = { phase: "awaiting_cost_confirmation" };
+        job.updated_at = now;
+        state.updated_at = now;
+        state.audit_events.push({ id: randomUUID(), occurred_at: now, actor: "imvia:provider_upload", reason: "Provider cost confirmation required before submission", changed_fields: ["status", "estimated_cost", "provider_cost"] });
+        return { job: clone(job) };
+      });
+      publish(listeners, { type: "job.updated", occurred_at: isoNow(), data: { job_id: result.job.id, status: result.job.status, attempt: result.job.attempt, status_message: result.job.status_message, progress: result.job.progress } });
+      return result;
+    },
+
+    async authorizeProviderCostAndResume({ job_id, attempt, cost_fingerprint, decision_id, resume_status = "uploading" }) {
+      if (resume_status !== "uploading") throw new DomainError("VALIDATION_FAILED", "Provider cost confirmation may resume only before submission.", { field: "resume_status" });
+      const result = await store.update((state) => {
+        const job = findJob(state, job_id);
+        assertCurrentCost(job, { attempt, cost_fingerprint });
+        const decision = (job.cost_decisions ?? []).find((item) => item.decision_id === decision_id);
+        if (!decision || decision.decision !== "accepted" || decision.consumed_at != null || decision.cost_fingerprint !== cost_fingerprint) {
+          throw new DomainError("COST_CONFIRMATION_CONFLICT", "The accepted cost decision is stale, missing, or already used.", { job_id, attempt, decision_id });
+        }
+        const now = isoNow();
+        decision.consumed_at = now;
+        decision.confirmation = { status: "authorized_for_submit", source: "imvia:provider_confirm", recorded_at: now };
+        job.pre_submit_cost_authorization = { decision_id, cost_fingerprint, attempt, resume_status, estimate: clone(job.estimated_cost), authorized_at: now, used_at: null };
+        job.status = resume_status;
+        job.status_message = "费用确认已接受，正在提交给外部提供方。";
+        job.progress = { phase: resume_status };
+        job.updated_at = now;
+        state.updated_at = now;
+        state.audit_events.push({ id: randomUUID(), occurred_at: now, actor: "imvia:provider_confirm", reason: "Provider cost authorized for one submission", changed_fields: ["status", "cost_decisions", "pre_submit_cost_authorization"] });
+        return { job: clone(job), decision: clone(decision) };
+      });
+      publish(listeners, { type: "job.updated", occurred_at: isoNow(), data: { job_id: result.job.id, status: result.job.status, attempt: result.job.attempt, status_message: result.job.status_message, progress: result.job.progress } });
+      return result;
+    },
+
+    async consumeProviderCostAuthorization({ job_id, attempt, cost_fingerprint, decision_id }) {
+      return store.update((state) => {
+        const job = findJob(state, job_id);
+        const authorization = job.pre_submit_cost_authorization;
+        if (job.status !== "uploading" || job.attempt !== attempt || !authorization || authorization.attempt !== attempt || authorization.resume_status !== "uploading" || authorization.cost_fingerprint !== cost_fingerprint || authorization.decision_id !== decision_id || authorization.used_at != null || costFingerprintForJob(job) !== cost_fingerprint) {
+          throw new DomainError("COST_CONFIRMATION_CONFLICT", "The provider cost authorization is stale or already used.", { job_id, attempt, decision_id });
+        }
+        const now = isoNow();
+        authorization.used_at = now;
+        job.updated_at = now;
+        state.updated_at = now;
+        state.audit_events.push({ id: randomUUID(), occurred_at: now, actor: "imvia:provider_submit", reason: "Provider cost authorization consumed", changed_fields: ["pre_submit_cost_authorization"] });
+        return { job: clone(job), authorization: clone(authorization) };
+      });
+    },
+
+    async refreshAwaitingCost({ job_id, attempt, estimated_cost, source, source_checked_at, decision_id = null, cost_fingerprint = null, lease_id = null }) {
+      assertM5Source(source);
+      const unknownCost = estimated_cost?.unknown === true;
+      if (!estimated_cost || typeof estimated_cost !== "object" || Array.isArray(estimated_cost) || (unknownCost
+        ? estimated_cost.amount != null || estimated_cost.unit != null
+        : !Number.isFinite(estimated_cost.amount) || estimated_cost.amount < 0 || typeof estimated_cost.unit !== "string" || !estimated_cost.unit)) {
+        throw new DomainError("VALIDATION_FAILED", "A complete sourced cost is required.", { field: "estimated_cost" });
+      }
+      const checkedAt = assertSourceCheckedAt(source_checked_at, { field: "source_checked_at" });
+      return store.update((state) => {
+        const job = findJob(state, job_id);
+        if (job.status !== "awaiting_cost_confirmation" || job.attempt !== attempt) {
+          throw statusConflict(job, "The provider cost can only be refreshed while the job awaits confirmation.", { expected_status: "awaiting_cost_confirmation", expected_attempt: attempt });
+        }
+        if (lease_id != null) {
+          assertCurrentCost(job, { attempt, cost_fingerprint });
+          const decision = (job.cost_decisions ?? []).find((item) => item.decision_id === decision_id);
+          if (!decision || decision.decision !== "accepted" || decision.consumed_at != null || decision.cost_fingerprint !== cost_fingerprint || decision.confirmation?.status !== "provider_pending" || decision.confirmation?.lease_id !== lease_id) {
+            throw new DomainError("COST_CONFIRMATION_CONFLICT", "The provider confirmation lease is stale or unavailable.", { job_id, attempt, decision_id });
+          }
+        }
+        const now = isoNow();
+        for (const decision of job.cost_decisions ?? []) {
+          if (decision.consumed_at == null) {
+            decision.consumed_at = now;
+            decision.confirmation = { status: "superseded", source, ...(lease_id != null ? { lease_id } : {}), recorded_at: now };
+          }
+        }
+        job.estimated_cost = unknownCost
+          ? { amount: null, unit: null, unknown: true, source, checked_at: checkedAt }
+          : { amount: estimated_cost.amount, unit: estimated_cost.unit, source, checked_at: checkedAt };
+        job.provider_cost = unknownCost ? { status: "unknown", amount: null, unit: null } : { status: estimated_cost.amount === 0 ? "known_free" : "pending", amount: estimated_cost.amount, unit: estimated_cost.unit };
+        job.updated_at = now;
+        state.updated_at = now;
+        state.audit_events.push({ id: randomUUID(), occurred_at: now, actor: source, reason: "Provider cost refreshed", changed_fields: ["estimated_cost", "provider_cost", "cost_decisions"] });
+        return { job: clone(job) };
+      });
+    },
+
     async claimCostDecision({ decision_id, job_id, attempt, cost_fingerprint }) {
       return store.update((state) => {
         const job = findJob(state, job_id);
@@ -1070,6 +1643,79 @@ export function createWorkbenchService({ dataDirectory }) {
         job.updated_at = decision.consumed_at;
         state.updated_at = decision.consumed_at;
         state.audit_events.push({ id: randomUUID(), occurred_at: decision.consumed_at, actor: "imvia:claim_cost_decision", reason: "Cost decision consumed", changed_fields: ["cost_decisions"] });
+        return { job: clone(job), decision: clone(decision) };
+      });
+    },
+
+    async reserveCostDecisionConfirmation({ decision_id, job_id, attempt, cost_fingerprint }) {
+      return store.update((state) => {
+        const job = findJob(state, job_id);
+        assertCurrentCost(job, { attempt, cost_fingerprint });
+        const decision = (job.cost_decisions ?? []).find((item) => item.decision_id === decision_id);
+        if (!decision || decision.decision !== "accepted" || decision.consumed_at != null || decision.cost_fingerprint !== cost_fingerprint || decision.confirmation?.status === "provider_pending") {
+          throw new DomainError("COST_CONFIRMATION_CONFLICT", "The cost decision cannot be reserved for provider confirmation.", { job_id, attempt, decision_id });
+        }
+        const now = isoNow();
+        const lease_id = randomUUID();
+        decision.confirmation = { status: "provider_pending", lease_id, source: "imvia:provider_confirm", reserved_at: now };
+        job.updated_at = now;
+        state.updated_at = now;
+        state.audit_events.push({ id: randomUUID(), occurred_at: now, actor: "imvia:provider_confirm", reason: "Cost decision reserved for provider confirmation", changed_fields: ["cost_decisions"] });
+        return { job: clone(job), decision: clone(decision), lease_id };
+      });
+    },
+
+    async verifyCostDecisionConfirmationLease({ decision_id, job_id, attempt, cost_fingerprint, lease_id }) {
+      const state = await store.read();
+      const job = findJob(state, job_id);
+      assertCurrentCost(job, { attempt, cost_fingerprint });
+      const decision = (job.cost_decisions ?? []).find((item) => item.decision_id === decision_id);
+      if (!decision || decision.decision !== "accepted" || decision.consumed_at != null || decision.cost_fingerprint !== cost_fingerprint || decision.confirmation?.status !== "provider_pending" || decision.confirmation?.lease_id !== lease_id) {
+        throw new DomainError("COST_CONFIRMATION_CONFLICT", "The provider confirmation lease is stale or unavailable.", { job_id, attempt, decision_id });
+      }
+      return { job: clone(job), decision: clone(decision) };
+    },
+
+    async releaseCostDecisionConfirmation({ decision_id, job_id, attempt, cost_fingerprint, lease_id }) {
+      return store.update((state) => {
+        const job = findJob(state, job_id);
+        assertCurrentCost(job, { attempt, cost_fingerprint });
+        const decision = (job.cost_decisions ?? []).find((item) => item.decision_id === decision_id);
+        if (!decision || decision.decision !== "accepted" || decision.consumed_at != null || decision.cost_fingerprint !== cost_fingerprint || decision.confirmation?.status !== "provider_pending" || decision.confirmation?.lease_id !== lease_id) {
+          throw new DomainError("COST_CONFIRMATION_CONFLICT", "The provider confirmation lease cannot be released.", { job_id, attempt, decision_id });
+        }
+        const now = isoNow();
+        decision.confirmation = null;
+        job.updated_at = now;
+        state.updated_at = now;
+        state.audit_events.push({ id: randomUUID(), occurred_at: now, actor: "imvia:provider_confirm", reason: "Provider confirmation lease released", changed_fields: ["cost_decisions"] });
+        return { job: clone(job), decision: clone(decision) };
+      });
+    },
+
+    async commitCostDecisionConfirmation({ decision_id, job_id, attempt, cost_fingerprint, lease_id = null, source, status_message, progress }) {
+      assertExecutionSource(source);
+      const normalizedStatusMessage = normalizeStatusMessage(status_message, "generating");
+      const normalizedProgress = normalizeProgress(progress);
+      return store.update((state) => {
+        const job = findJob(state, job_id);
+        assertCurrentCost(job, { attempt, cost_fingerprint });
+        const decision = (job.cost_decisions ?? []).find((item) => item.decision_id === decision_id);
+        const leaseMatches = lease_id == null
+          ? decision?.confirmation?.status !== "provider_pending"
+          : decision?.confirmation?.status === "provider_pending" && decision.confirmation?.lease_id === lease_id;
+        if (!decision || decision.decision !== "accepted" || decision.consumed_at != null || decision.cost_fingerprint !== cost_fingerprint || !leaseMatches || job.status !== "awaiting_cost_confirmation") {
+          throw new DomainError("COST_CONFIRMATION_CONFLICT", "The cost decision cannot be committed.", { job_id, attempt, decision_id });
+        }
+        const now = isoNow();
+        decision.consumed_at = now;
+        decision.confirmation = { status: "succeeded", source, ...(lease_id == null ? {} : { lease_id }), recorded_at: now };
+        job.status = "generating";
+        job.status_message = normalizedStatusMessage;
+        job.progress = normalizedProgress;
+        job.updated_at = now;
+        state.updated_at = now;
+        state.audit_events.push({ id: randomUUID(), occurred_at: now, actor: source, reason: "Cost decision committed for generation", changed_fields: ["status", "status_message", "progress", "cost_decisions"] });
         return { job: clone(job), decision: clone(decision) };
       });
     },
@@ -1101,7 +1747,11 @@ export function createWorkbenchService({ dataDirectory }) {
             const info = await lstat(artifactPath);
             if (!info.isFile() || info.isSymbolicLink()) throw new DomainError("PATH_NOT_ALLOWED", "Artifact path must identify a regular managed file.");
             const sha256 = createHash("sha256").update(await readFile(artifactPath)).digest("hex");
-            const duplicate = state.artifacts.find((artifact) => artifact.job_id === job.id && ((input.source_artifact_id && artifact.source_artifact_id === input.source_artifact_id) || artifact.sha256 === sha256));
+            const duplicate = state.artifacts.find((artifact) => artifact.job_id === job.id && (
+              input.source_artifact_id
+                ? artifact.source_artifact_id === input.source_artifact_id
+                : artifact.sha256 === sha256
+            ));
             if (duplicate) {
               artifactIds.push(duplicate.id);
               results.push({ ok: true, duplicate: true, artifact: clone(duplicate) });
@@ -1132,13 +1782,25 @@ export function createWorkbenchService({ dataDirectory }) {
         }
         const succeeded = results.filter((item) => item.ok).length;
         job.status = succeeded === results.length ? "succeeded" : succeeded > 0 ? "partially_succeeded" : "failed";
+        job.status_message = statusMessageFor(job.status);
+        job.progress = { phase: job.status === "failed" ? "failed" : "completed", status: job.status };
         job.error = succeeded === results.length ? null : { code: "ARTIFACT_IMPORT_FAILED", failed: results.length - succeeded, source: "imvia:import_result" };
         job.updated_at = isoNow();
         state.updated_at = job.updated_at;
         state.idempotency[idempotency_key] = { operation: "import_result", job_id, artifact_ids: artifactIds };
         return { job: clone(job), results, idempotent: false };
       });
-      publish(listeners, { type: "job.updated", occurred_at: isoNow(), data: { job_id: result.job.id, status: result.job.status, attempt: result.job.attempt } });
+      publish(listeners, {
+        type: "job.updated",
+        occurred_at: isoNow(),
+        data: {
+          job_id: result.job.id,
+          status: result.job.status,
+          attempt: result.job.attempt,
+          status_message: result.job.status_message,
+          progress: result.job.progress,
+        },
+      });
       if (result.results.some((item) => item.ok)) publish(listeners, { type: "artifact.imported", occurred_at: isoNow(), data: { job_id: result.job.id, artifact_ids: result.results.filter((item) => item.ok).map((item) => item.artifact.id) } });
       return result;
     },

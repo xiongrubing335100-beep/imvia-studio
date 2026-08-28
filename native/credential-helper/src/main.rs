@@ -1,7 +1,7 @@
 use std::env;
 use std::io::{self, BufRead, Write};
 
-use imvia_credential_helper::protocol::{CandidateMessage, CredentialPair, RequestMessage, ResultMessage, VerdictMessage, PROTOCOL_VERSION};
+use imvia_credential_helper::protocol::{CandidateMessage, CredentialField, RequestMessage, ResultMessage, VerdictMessage, PROTOCOL_VERSION};
 use imvia_credential_helper::store::{CredentialStore, StoreStatus};
 use imvia_credential_helper::ui::{CredentialPrompt, PromptOutcome};
 
@@ -21,47 +21,52 @@ fn read_line() -> Result<String, imvia_credential_helper::protocol::HelperError>
     Ok(line)
 }
 
-fn require_request(expected_operation: &str) -> Result<(), imvia_credential_helper::protocol::HelperError> {
+fn require_request(expected_operation: &str) -> Result<RequestMessage, imvia_credential_helper::protocol::HelperError> {
     let request: RequestMessage = serde_json::from_str(&read_line()?).map_err(|_| imvia_credential_helper::protocol::HelperError::new("UPSTREAM_SECURITY_REJECTED"))?;
-    if request.v != PROTOCOL_VERSION || request.message_type != "request" || request.op.as_deref() != Some(expected_operation) {
-        return Err(imvia_credential_helper::protocol::HelperError::new("UPSTREAM_SECURITY_REJECTED"));
-    }
-    Ok(())
+    request.validate(expected_operation)?;
+    Ok(request)
 }
 
 fn run<S: CredentialStore, P: CredentialPrompt>(operation: &str, store: &S, prompt: &P) -> Result<(), imvia_credential_helper::protocol::HelperError> {
-    require_request(operation)?;
+    let request = require_request(operation)?;
+    let profile_id = request.profile_id.as_deref();
+    let legacy = request.is_legacy();
     match operation {
         "status" => {
-            let result = match store.status() {
+            let result = match store.status(profile_id) {
                 StoreStatus::Connected => ResultMessage::connected("CONNECTED"),
                 StoreStatus::SetupRequired => ResultMessage::setup_required("SETUP_REQUIRED"),
             };
             emit(&result)?;
         }
         "read" => {
-            let pair = store.read()?;
-            emit(&ResultMessage::with_credentials(pair))?;
+            let values = store.read(profile_id)?;
+            if legacy { emit(&ResultMessage::with_credentials(values.into_pair()?))?; }
+            else { emit(&ResultMessage::with_values(values))?; }
         }
         "clear" => {
-            store.clear()?;
+            store.clear(profile_id)?;
             emit(&ResultMessage::setup_required("SETUP_REQUIRED"))?;
         }
         "configure" => {
-            let outcome = prompt.prompt()?;
-            let PromptOutcome::Candidate(pair) = outcome else {
+            let legacy_fields = [
+                CredentialField { id: "access_key".to_owned(), label: "Access Key".to_owned(), secret: true, required: true },
+                CredentialField { id: "secret_key".to_owned(), label: "Secret Key".to_owned(), secret: true, required: true },
+            ];
+            let fields = request.fields.as_deref().unwrap_or(&legacy_fields);
+            let outcome = prompt.prompt(fields)?;
+            let PromptOutcome::Candidate(values) = outcome else {
                 emit(&ResultMessage::setup_required("SETUP_CANCELLED"))?;
                 return Ok(());
             };
-            let candidate = CandidateMessage {
-                v: PROTOCOL_VERSION,
-                message_type: "candidate",
-                access_key: &pair.access_key,
-                secret_key: &pair.secret_key,
-            };
             let stdout = io::stdout();
             let mut handle = stdout.lock();
-            serde_json::to_writer(&mut handle, &candidate).map_err(|_| imvia_credential_helper::protocol::HelperError::new("HELPER_LAUNCH_FAILED"))?;
+            if legacy {
+                let pair = imvia_credential_helper::protocol::CredentialValues { values: values.values.clone() }.into_pair()?;
+                serde_json::to_writer(&mut handle, &CandidateMessage::legacy(&pair)).map_err(|_| imvia_credential_helper::protocol::HelperError::new("HELPER_LAUNCH_FAILED"))?;
+            } else {
+                serde_json::to_writer(&mut handle, &CandidateMessage::profile(&values)).map_err(|_| imvia_credential_helper::protocol::HelperError::new("HELPER_LAUNCH_FAILED"))?;
+            }
             handle.write_all(b"\n").map_err(|_| imvia_credential_helper::protocol::HelperError::new("HELPER_LAUNCH_FAILED"))?;
             handle.flush().map_err(|_| imvia_credential_helper::protocol::HelperError::new("HELPER_LAUNCH_FAILED"))?;
             drop(handle);
@@ -70,7 +75,7 @@ fn run<S: CredentialStore, P: CredentialPrompt>(operation: &str, store: &S, prom
                 return Err(imvia_credential_helper::protocol::HelperError::new("UPSTREAM_SECURITY_REJECTED"));
             }
             if verdict.accepted {
-                store.write(&pair)?;
+                store.write(profile_id, &values)?;
                 emit(&ResultMessage::connected("CONNECTED"))?;
             } else {
                 emit(&ResultMessage::setup_required(&verdict.code))?;

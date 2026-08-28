@@ -64,6 +64,33 @@ test("send maps the workbench generation input to the official request shape", a
       include_tools: ["generate_image_midjourney"],
     },
   });
+  assert.match(request.headers["Idempotency-Key"], /^[0-9a-f]{32}$/u);
+});
+
+test("provider business rejections preserve a sanitized submit-stage reason", async () => {
+  const client = createLovartClient({
+    credentials: { accessKey: "ak_private", secretKey: "sk_private" },
+    fetchImpl: async () => response(200, {
+      code: 2601,
+      message: "unknown model I2Image 2 for ak_private and sk_private",
+      data: null,
+    }),
+  });
+
+  await assert.rejects(
+    () => client.send({ prompt: "A portrait", project_id: "project-1" }),
+    (error) => {
+      assert.equal(error.code, "UPSTREAM_UNAVAILABLE");
+      assert.equal(error.operation, "submit");
+      assert.equal(error.details.provider_code, 2601);
+      assert.equal(error.details.operation, "submit");
+      assert.equal(error.details.provider_message, "unknown model I2Image 2 for [REDACTED] and [REDACTED]");
+      assert.match(error.message, /unknown model I2Image 2/u);
+      assert.equal(error.message.includes("ak_private"), false);
+      assert.equal(error.message.includes("sk_private"), false);
+      return true;
+    },
+  );
 });
 
 test("HTTP authentication failures are stable and never include secrets", async () => {

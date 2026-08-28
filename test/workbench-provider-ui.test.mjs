@@ -7,6 +7,7 @@ import {
   connectionErrorMessage,
   connectionModelGroups,
   connectionRequestHeaders,
+  filterConnectionModels,
   filterProviderModels,
   isSelectableConnection,
   resolveProviderSelection,
@@ -102,8 +103,38 @@ test("groups safe model catalog entries by compatibility for the active mode", (
     { id: "video-only", name: "Video only", capabilities: ["video"], compatibility: "unsupported" },
   ] } }, "image");
   assert.deepEqual(groups.confirmed.map((model) => model.id), ["image-confirmed"]);
-  assert.deepEqual(groups.unconfirmed.map((model) => model.id), ["image-unknown"]);
-  assert.deepEqual(groups.unsupported.map((model) => model.id), ["video-only"]);
+  assert.deepEqual(groups.unconfirmed.map((model) => model.id), []);
+  assert.deepEqual(groups.unsupported.map((model) => model.id), ["image-unknown", "video-only"]);
+});
+
+test("external selection uses only the enabled connection catalog while retaining unsupported entries for details", () => {
+  const connection = { provider_id: "external-api", status: "connected", enabled: true, legacy: false, catalog: { models: [
+    { id: "provider-image", name: "Provider Image", capabilities: ["image"], compatibility: "confirmed" },
+    { id: "unknown-model", name: "Unknown model", capabilities: ["image"], compatibility: "unconfirmed" },
+    { id: "video-only", name: "Video only", capabilities: ["video"], compatibility: "confirmed" },
+  ] } };
+  const filtered = filterConnectionModels({ connection, mode: "image" });
+  assert.deepEqual(filtered.selectable.map((model) => model.id), ["provider-image", "unknown-model"]);
+  assert.equal(filtered.selectable.some((model) => model.id === "Auto"), false);
+  assert.deepEqual(filtered.unsupported.map((model) => model.id), ["video-only"]);
+  assert.deepEqual(filterProviderModels({ provider: { id: "external-api", models: [{ id: "descriptor-only", capabilities: ["image"] }] }, connection, mode: "image" }).map((model) => model.id), ["provider-image", "unknown-model"]);
+});
+
+test("a raw external API model named Auto stays visible as unsupported and cannot become a selection", () => {
+  const connection = { connection_id: "auto-only", provider_id: "external", status: "connected", enabled: true, legacy: false, catalog: { models: [
+    { id: "Auto", name: "Provider Auto", capabilities: ["image"], compatibility: "confirmed" },
+  ] } };
+  const filtered = filterConnectionModels({ connection, mode: "image" });
+  assert.deepEqual(filtered.selectable, []);
+  assert.deepEqual(filtered.unsupported.map((model) => model.id), ["Auto"]);
+  assert.deepEqual(resolveProviderSelection({
+    providers,
+    connections: [connection],
+    rememberedProvider: "external",
+    rememberedConnection: "auto-only",
+    rememberedModel: "Auto",
+    explicitProviderSelection: false,
+  }), { provider_id: "lovart", connection_id: null, model: "Auto" });
 });
 
 test("provider refreshes have a stable signature so unchanged controls are not rebuilt", () => {
@@ -122,12 +153,14 @@ test("provider selection serializes only immutable public IDs and model metadata
 test("provider model choices filter by image and video capability", () => {
   assert.deepEqual(filterProviderModels({ provider: providers[0], mode: "image" }).map((model) => model.id), ["Auto", "Image 2"]);
   assert.deepEqual(filterProviderModels({ provider: providers[0], mode: "video" }).map((model) => model.id), ["Auto", "Seedance"]);
-  assert.deepEqual(filterProviderModels({ provider: { models: [{ id: "Auto", display_name: "由接口映射决定", capabilities: ["image", "video"] }] }, mode: "image" }).map((model) => model.id), ["Auto"]);
+  assert.deepEqual(filterProviderModels({ provider: { id: "lovart", models: [{ id: "Auto", display_name: "由接口映射决定", capabilities: ["image", "video"] }] }, mode: "image" }).map((model) => model.id), ["Auto"]);
 });
 
-test("disabled external connections cannot be selected and Lovart defaults safely", () => {
+test("only discovered, enabled external connections can be selected and Lovart defaults safely", () => {
   assert.equal(isSelectableConnection({ providerId: "external", connection: { provider_id: "external", enabled: false } }), false);
-  assert.equal(isSelectableConnection({ providerId: "external", connection: { provider_id: "external", enabled: true } }), true);
+  assert.equal(isSelectableConnection({ providerId: "external", connection: { provider_id: "external", enabled: true } }), false);
+  assert.equal(isSelectableConnection({ providerId: "external", connection: { provider_id: "external", enabled: true, legacy: false, catalog: { models: [{ id: "provider-image" }] } } }), false);
+  assert.equal(isSelectableConnection({ providerId: "external", connection: { provider_id: "external", status: "connected", enabled: true, legacy: false, catalog: { models: [{ id: "provider-image" }] } } }), true);
   assert.deepEqual(serializeProviderSelection({}), { provider_id: "lovart", connection_id: null, model: "Auto" });
 });
 
@@ -144,8 +177,8 @@ test("stale external selection without an enabled connection falls back to Lovar
   });
 });
 
-test("a configured external connection becomes the current route unless Lovart was explicitly selected", () => {
-  const connections = [{ connection_id: "connection-1", provider_id: "external", enabled: true }];
+test("a connected one-model external catalog auto-resolves to its model and resets back to Lovart Auto", () => {
+  const connections = [{ connection_id: "connection-1", provider_id: "external", status: "connected", enabled: true, legacy: false, catalog: { models: [{ id: "provider-image", name: "Provider Image", capabilities: ["image"], compatibility: "confirmed" }] } }];
   assert.deepEqual(resolveProviderSelection({
     providers,
     connections,
@@ -153,7 +186,7 @@ test("a configured external connection becomes the current route unless Lovart w
     rememberedConnection: null,
     explicitProviderSelection: false,
   }), {
-    provider_id: "external", connection_id: "connection-1", model: "Auto",
+    provider_id: "external", connection_id: "connection-1", model: "provider-image",
   });
   assert.deepEqual(resolveProviderSelection({
     providers,
@@ -164,4 +197,6 @@ test("a configured external connection becomes the current route unless Lovart w
   }), {
     provider_id: "lovart", connection_id: null, model: "Auto",
   });
+  assert.match(providerUiSource, /dataset\.imviaModel = selection\.model/u);
+  assert.match(providerUiSource, /dispatchProviderSelection\(documentRoot, \{ selection, provider, connection, mode \}\)/u);
 });

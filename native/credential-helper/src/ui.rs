@@ -1,12 +1,12 @@
-use crate::protocol::{CredentialPair, HelperError};
+use crate::protocol::{CredentialField, CredentialValues, HelperError};
 
 pub enum PromptOutcome {
-    Candidate(CredentialPair),
+    Candidate(CredentialValues),
     Cancelled,
 }
 
 pub trait CredentialPrompt {
-    fn prompt(&self) -> Result<PromptOutcome, HelperError>;
+    fn prompt(&self, fields: &[CredentialField]) -> Result<PromptOutcome, HelperError>;
 }
 
 #[cfg(target_os = "macos")]
@@ -19,5 +19,5 @@ pub struct UnsupportedCredentialPrompt;
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 impl CredentialPrompt for UnsupportedCredentialPrompt {
-    fn prompt(&self) -> Result<PromptOutcome, HelperError> { Err(HelperError::new("PLATFORM_UNSUPPORTED")) }
+    fn prompt(&self, _fields: &[CredentialField]) -> Result<PromptOutcome, HelperError> { Err(HelperError::new("PLATFORM_UNSUPPORTED")) }
 }

@@ -6,13 +6,21 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createCostFingerprint } from "../src/domain/cost-confirmation.js";
+import { createServer } from "../src/index.js";
+import { createAdapterRegistry } from "../src/providers/adapter-registry.js";
+import { createConnectionStore } from "../src/providers/connection-store.js";
+import { createProviderRegistry } from "../src/providers/provider-registry.js";
 
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-async function connect(context) {
+async function connect(context, { connections = [] } = {}) {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-mcp-workbench-"));
   context.after(() => rm(dataDirectory, { recursive: true, force: true }));
+  if (connections.length) {
+    await writeFile(path.join(dataDirectory, "provider-connections-v1.json"), JSON.stringify({ schema_version: "provider-connections-v2", connections }));
+  }
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [path.join(pluginRoot, "src/index.js")],
@@ -31,8 +39,14 @@ test("MCP reads, patches, prepares, and lists only its local workbench state", a
   const tools = await client.listTools();
   assert.deepEqual(
     tools.tools.map((tool) => tool.name).sort(),
-    ["imvia_authorize_lovart_probe", "imvia_claim_cost_decision", "imvia_confirm_generation", "imvia_connect_lovart", "imvia_create_iteration", "imvia_create_lovart_project", "imvia_disconnect_lovart", "imvia_execute_workbench_submission", "imvia_follow_up_generation", "imvia_generate", "imvia_get_account_status", "imvia_get_generation", "imvia_get_state", "imvia_health", "imvia_import_result", "imvia_list_lovart_projects", "imvia_list_pending_jobs", "imvia_lovart_status", "imvia_open_workbench", "imvia_patch_workbench", "imvia_prepare_generation", "imvia_probe_lovart_capabilities", "imvia_record_cost_decision", "imvia_select_lovart_project", "imvia_update_account_status", "imvia_update_job", "imvia_wait_for_workbench_submission"],
+    ["imvia_authorize_lovart_probe", "imvia_claim_cost_decision", "imvia_claim_next_workbench_dispatch", "imvia_confirm_generation", "imvia_confirm_provider_cost", "imvia_connect_lovart", "imvia_create_iteration", "imvia_create_lovart_project", "imvia_disconnect_lovart", "imvia_execute_workbench_submission", "imvia_follow_up_generation", "imvia_generate", "imvia_get_account_status", "imvia_get_bridge_status", "imvia_get_generation", "imvia_get_state", "imvia_health", "imvia_heartbeat_conversation_bridge", "imvia_import_result", "imvia_list_lovart_projects", "imvia_list_pending_jobs", "imvia_list_provider_connections", "imvia_list_providers", "imvia_lovart_status", "imvia_mark_dispatch_host_accepted", "imvia_open_workbench", "imvia_patch_workbench", "imvia_prepare_generation", "imvia_probe_lovart_capabilities", "imvia_record_cost_decision", "imvia_register_conversation_bridge", "imvia_release_dispatch_claim", "imvia_select_lovart_project", "imvia_test_provider_connection", "imvia_update_account_status", "imvia_update_job", "imvia_wait_for_workbench_submission"],
   );
+  const openWorkbenchTool = tools.tools.find((tool) => tool.name === "imvia_open_workbench");
+  assert.match(openWorkbenchTool.description, /Use only when.*IMVIA Studio/iu);
+  assert.match(openWorkbenchTool.description, /Do not use.*Imvia Layer/iu);
+  const executeTool = tools.tools.find((tool) => tool.name === "imvia_execute_workbench_submission");
+  assert.deepEqual(Object.keys(executeTool.inputSchema.properties), ["job_id", "snapshot_digest"]);
+  assert.deepEqual(executeTool.inputSchema.required, ["job_id", "snapshot_digest"]);
 
   const initial = await client.callTool({ name: "imvia_get_state", arguments: {} });
   assert.equal(initial.structuredContent.ok, true);
@@ -67,14 +81,94 @@ test("MCP reads, patches, prepares, and lists only its local workbench state", a
   assert.deepEqual(pending.structuredContent.data.jobs.map((job) => job.id), [prepared.structuredContent.data.job_id]);
 });
 
+test("MCP provider management lists only redacted metadata and rejects unknown connection tests", async (context) => {
+  const client = await connect(context, {
+    connections: [{
+      connection_id: "modern-fixture", name: "Modern Fixture", provider_id: "external-api", legacy: false,
+      base_url: "https://api.example.test/v1", credential_ref: "private-profile", endpoint_mappings: { submit: { authorization: "Bearer private" } }, settings: { private_token: "private" },
+      status: "connected", enabled: true, protocol: "openai-compatible", adapter_id: "openai-images", adapter_version: "1", config_revision: 2,
+      model_catalog: { digest: "catalog-digest", discovered_at: "2026-08-25T00:00:00.000Z", models: [{ id: "vendor-image", display_name: "Vendor Image", capabilities: ["image"], compatibility: "unconfirmed", source: "api", raw_index: 0 }] },
+    }],
+  });
+  const providers = await client.callTool({ name: "imvia_list_providers", arguments: { mode: "image" } });
+  assert.equal(providers.structuredContent.ok, true);
+  assert.equal(JSON.stringify(providers.structuredContent).includes("access_key"), false);
+  assert.equal(JSON.stringify(providers.structuredContent).includes("secret_key"), false);
+  const connections = await client.callTool({ name: "imvia_list_provider_connections", arguments: {} });
+  assert.equal(connections.structuredContent.data.connections.length, 1);
+  assert.equal(connections.structuredContent.data.connections[0].status, "connected");
+  assert.equal(connections.structuredContent.data.connections[0].protocol, "openai-compatible");
+  assert.deepEqual(connections.structuredContent.data.connections[0].adapter, { id: "openai-images", version: "1" });
+  assert.deepEqual(connections.structuredContent.data.connections[0].catalog.models.map(({ id, name }) => [id, name]), [["vendor-image", "Vendor Image"]]);
+  assert.equal(JSON.stringify(connections.structuredContent).includes("endpoint_mappings"), false);
+  assert.equal(JSON.stringify(connections.structuredContent).includes("settings"), false);
+  assert.equal(JSON.stringify(connections.structuredContent).includes("credential_ref"), false);
+  assert.equal(JSON.stringify(connections.structuredContent).includes("private"), false);
+  const missing = await client.callTool({ name: "imvia_test_provider_connection", arguments: { connection_id: "missing" } });
+  assert.equal(missing.structuredContent.ok, false);
+  assert.equal(missing.structuredContent.error.code, "NOT_FOUND");
+});
+
+test("MCP tests a modern connection through its pinned adapter and keeps legacy validation generic", async (context) => {
+  const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "imvia-mcp-provider-test-"));
+  const external = { id: "external-api", display_name: "External API", kind: "discovered", adapter_id: null, capabilities: ["image"], models: [], credential_fields: [{ id: "api_key", label: "API Key", secret: true, required: true }] };
+  const legacyDescriptor = { id: "legacy-rest", display_name: "Legacy REST", kind: "generic_rest", capabilities: ["image"], models: [], credential_fields: [{ id: "api_key", label: "API Key", secret: true, required: true }] };
+  const providerRegistry = createProviderRegistry({ builtIns: [external, legacyDescriptor] });
+  let nextConnection = 0;
+  const connectionStore = createConnectionStore({ dataDirectory, registry: providerRegistry, id: () => `provider-test-${++nextConnection}` });
+  const adapterCalls = [];
+  const adapterRegistry = createAdapterRegistry({ adapters: [{
+    id: "fixture-modern", version: "1",
+    async discover() { return {}; },
+    classifyModel: () => ({ capabilities: ["image"], compatibility: "confirmed" }),
+    estimateCost: () => ({ status: "unknown" }),
+    async validateConnection(input) { adapterCalls.push(input.connection.connection_id); return { accepted: true }; },
+    async submit() { return {}; }, async poll() { return {}; }, async cancel() { return {}; }, async importResults() { return {}; },
+  }] });
+  const modernDraft = await connectionStore.createDraft({ name: "Modern", base_url: "api.example.test" });
+  const modern = await connectionStore.completeDiscovery(modernDraft.connection_id, {
+    protocol: "fixture", adapter_id: "fixture-modern", adapter_version: "1", provider_label: "Fixture", models_endpoint: "https://api.example.test/models",
+    catalog: { digest: "fixture", discovered_at: "2026-08-25T00:00:00.000Z", models: [{ id: "fixture-image", display_name: "Fixture Image", capabilities: ["image"], compatibility: "confirmed" }], counts: { total: 1, confirmed: 1, unconfirmed: 0, unsupported: 0 } },
+  });
+  const legacy = await connectionStore.create({ provider_id: "legacy-rest", name: "Legacy", base_url: "https://legacy.example.test", endpoint_mappings: {} });
+  const server = createServer({
+    service: {}, probeService: { async authorize() {}, async probe() {} }, dataDirectory, providerRegistry, connectionStore, adapterRegistry,
+    providerCredentialService: { async configure() {}, async read() { return { api_key: "private" }; }, async clear() {} },
+  });
+  const client = new Client({ name: "imvia-provider-test", version: "0.1.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  context.after(async () => { await client.close(); await server.close(); await rm(dataDirectory, { recursive: true, force: true }); });
+
+  const modernTest = await client.callTool({ name: "imvia_test_provider_connection", arguments: { connection_id: modern.connection_id } });
+  assert.equal(modernTest.structuredContent.ok, true);
+  assert.equal(modernTest.structuredContent.data.status, "connected");
+  assert.deepEqual(adapterCalls, [modern.connection_id]);
+
+  const legacyTest = await client.callTool({ name: "imvia_test_provider_connection", arguments: { connection_id: legacy.connection_id } });
+  assert.equal(legacyTest.structuredContent.ok, false);
+  assert.equal(legacyTest.structuredContent.error.code, "VALIDATION_FAILED");
+  assert.deepEqual(adapterCalls, [modern.connection_id]);
+});
+
 test("MCP waits for a new workbench button submission and returns its exact summary to Codex", async (context) => {
   const client = await connect(context);
   const opened = await client.callTool({ name: "imvia_open_workbench", arguments: {} });
   const cursor = opened.structuredContent.data.submission_cursor;
 
-  const response = await fetch(`${opened.structuredContent.data.workbench_url.replace(/\/workbench\?imvia=live$/u, "")}/api/v1/workbench/submissions`, {
+  const origin = new URL(opened.structuredContent.data.workbench_url).origin;
+  const rejected = await fetch(`${origin}/api/v1/workbench/submissions`, {
     method: "POST",
     headers: { "content-type": "application/json" },
+    body: JSON.stringify({ idempotency_key: "mcp-no-session", snapshot: { mode: "image", prompt: { text: "must not persist", tokens: [] }, attachments: [], settings: {} } }),
+  });
+  assert.equal(rejected.status, 400);
+  const afterRejected = await client.callTool({ name: "imvia_get_state", arguments: { include: ["jobs"] } });
+  assert.deepEqual(afterRejected.structuredContent.data.jobs, []);
+  const response = await fetch(`${origin}/api/v1/workbench/submissions`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-imvia-workbench-session": opened.structuredContent.data.workbench_session_id, "x-imvia-workbench-token": opened.structuredContent.data.open_token },
     body: JSON.stringify({
       idempotency_key: "mcp-handoff-1",
       snapshot: {
@@ -95,6 +189,102 @@ test("MCP waits for a new workbench button submission and returns its exact summ
   assert.equal(received.structuredContent.data.submitted, true);
   assert.equal(received.structuredContent.data.snapshot.prompt.text, "Exact workbench summary");
   assert.equal(received.structuredContent.data.activation.source, "workbench_action");
+});
+
+test("a newly opened workbench URL carries the current job baseline", async (context) => {
+  const client = await connect(context);
+  const initial = await client.callTool({ name: "imvia_get_state", arguments: {} });
+  const draftId = initial.structuredContent.data.draft.id;
+  await client.callTool({
+    name: "imvia_patch_workbench",
+    arguments: {
+      draft_id: draftId,
+      base_revision: 0,
+      actor: "codex",
+      reason: "Create a baseline job.",
+      patch: { "prompt.text": "Previous session task" },
+    },
+  });
+  const prepared = await client.callTool({
+    name: "imvia_prepare_generation",
+    arguments: { draft_id: draftId, expected_revision: 1, idempotency_key: "baseline-job" },
+  });
+
+  const opened = await client.callTool({ name: "imvia_open_workbench", arguments: {} });
+  const url = new URL(opened.structuredContent.data.workbench_url);
+
+  assert.equal(url.searchParams.get("submission_cursor"), prepared.structuredContent.data.job_id);
+});
+
+test("MCP emits a visible receipt progress notification for a workbench submission", async (context) => {
+  const client = await connect(context);
+  const opened = await client.callTool({ name: "imvia_open_workbench", arguments: {} });
+  const cursor = opened.structuredContent.data.submission_cursor;
+  await fetch(`${new URL(opened.structuredContent.data.workbench_url).origin}/api/v1/workbench/submissions`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-imvia-workbench-session": opened.structuredContent.data.workbench_session_id, "x-imvia-workbench-token": opened.structuredContent.data.open_token },
+    body: JSON.stringify({
+      idempotency_key: "mcp-progress-handoff-1",
+      snapshot: { mode: "video", prompt: { text: "Progress receipt", tokens: [] }, attachments: [], settings: {} },
+    }),
+  });
+
+  const progress = [];
+  const received = await client.callTool(
+    { name: "imvia_wait_for_workbench_submission", arguments: { after_job_id: cursor, timeout_ms: 1_000 } },
+    undefined,
+    { onprogress: (update) => progress.push(update) },
+  );
+  assert.equal(received.structuredContent.data.submitted, true);
+  assert.ok(progress.some((update) => /已收到工作台任务/u.test(update.message)));
+});
+
+test("MCP Apps bridge delivers a session-bound workbench dispatch", async (context) => {
+  const client = await connect(context);
+  const opened = await client.callTool({ name: "imvia_open_workbench", arguments: {} });
+  const data = opened.structuredContent.data;
+  const resources = await client.listResources();
+  assert.ok(resources.resources.some((resource) => resource.uri === "ui://imvia-studio/conversation-bridge-v1.html"));
+  const bridgeResource = await client.readResource({ uri: "ui://imvia-studio/conversation-bridge-v1.html" });
+  const bridgeHtml = bridgeResource.contents?.[0]?.text || "";
+  assert.match(bridgeHtml, /ui\/message/u);
+  assert.match(bridgeHtml, /imvia_claim_next_workbench_dispatch/u);
+  assert.match(bridgeHtml, /ontoolresult/u);
+  assert.match(bridgeHtml, /ui\/notifications\/tool-result/u);
+  assert.match(bridgeHtml, /getHostCapabilities/u);
+  assert.match(bridgeHtml, /ui\/message/u);
+  assert.doesNotMatch(bridgeHtml, /if \(!apps[^\n]+!sessionId\)/u);
+  const bridgeId = "integration-bridge-1";
+  const registered = await client.callTool({
+    name: "imvia_register_conversation_bridge",
+    arguments: { session_id: data.workbench_session_id, open_token: data.open_token, bridge_id: bridgeId },
+  });
+  assert.equal(registered.structuredContent.data.bridge_state, "ready");
+
+  const response = await fetch(`${new URL(data.workbench_url).origin}/api/v1/workbench/submissions`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-imvia-workbench-session": data.workbench_session_id,
+      "x-imvia-workbench-token": data.open_token,
+    },
+    body: JSON.stringify({
+      idempotency_key: "mcp-bridge-delivery-1",
+      snapshot: { mode: "image", model: "Image 2", prompt: { text: "Bridge delivery integration", tokens: [] }, attachments: [], settings: { ratio: "3:4" } },
+    }),
+  });
+  const submitted = await response.json();
+  assert.equal(response.status, 202);
+  assert.equal(submitted.data.delivery_state, "pending_bridge");
+
+  const claimed = await client.callTool({ name: "imvia_claim_next_workbench_dispatch", arguments: { session_id: data.workbench_session_id, bridge_id: bridgeId } });
+  const dispatch = claimed.structuredContent.data.dispatch;
+  assert.equal(dispatch.job_id, submitted.data.job_id);
+  assert.equal(dispatch.schema_version, "imvia.workbench-task.v1");
+  assert.equal(dispatch.activation.source, "workbench_action");
+  await client.callTool({ name: "imvia_mark_dispatch_host_accepted", arguments: { dispatch_id: dispatch.dispatch_id, session_id: data.workbench_session_id, bridge_id: bridgeId, claim_token: dispatch.claim_token } });
+  const delivery = await fetch(`${new URL(data.workbench_url).origin}/api/v1/jobs/${encodeURIComponent(submitted.data.job_id)}/delivery`).then((result) => result.json());
+  assert.equal(delivery.data.delivery_state, "host_accepted");
 });
 
 test("MCP caches fixture billing mode without inventing a balance", async (context) => {

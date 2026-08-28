@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "helpers": {
+    "darwin-arm64": {
+      "path": "native/darwin-arm64/imvia-credential-helper",
+      "sha256": "0628fb485ea0b77835377ff57c1ac7543b9e65d97dc7f2b0de5f85b6e034bc86"
+    },
+    "darwin-x64": {
+      "path": "native/darwin-x64/imvia-credential-helper",
+      "sha256": "c611b6dce4918fccec4f4065ab45d576dee828e6df4d610d9ce8bb476ece946a"
+    },
+    "win32-arm64": {
+      "path": "native/win32-arm64/imvia-credential-helper.exe",
+      "sha256": "fbaa8303d0e0a50d3efa782414752f0769d757de0ea725bc8409408c282a7e5a"
+    },
+    "win32-x64": {
+      "path": "native/win32-x64/imvia-credential-helper.exe",
+      "sha256": "9e5c5a9c35feef083d02e03e16bcb74bf26e074642b7acfcde04fc8a2ff6faaf"
+    }
+  }
+}

@@ -67,6 +67,8 @@ export function createCredentialService({
   async function status() {
     if (!((platform === "darwin" || platform === "win32") && (arch === "arm64" || arch === "x64"))) return unsupported();
     try {
+      // Omitting profileId/fields is the compatibility signal for the fixed
+      // Lovart private profile. Provider connections use the separate facade.
       return publicResult(await helperClient.status(), now);
     } catch (error) {
       const code = publicCode(error?.code, "HELPER_NOT_PACKAGED");
@@ -77,7 +79,7 @@ export function createCredentialService({
   async function getCredentials() {
     if (!((platform === "darwin" || platform === "win32") && (arch === "arm64" || arch === "x64"))) throw errorFor("PLATFORM_UNSUPPORTED");
     try {
-      const pair = await helperClient.read();
+      const pair = await helperClient.read(); // Deliberately the legacy profile.
       if (!pair?.accessKey?.trim() || !pair?.secretKey?.trim()) throw errorFor("SETUP_REQUIRED");
       return { accessKey: pair.accessKey.trim(), secretKey: pair.secretKey.trim() };
     } catch (error) {
@@ -91,6 +93,8 @@ export function createCredentialService({
     if (typeof validate !== "function") throw new TypeError("validate is required");
     try {
       const result = await helperClient.configure({
+        // Deliberately omit profileId/fields to preserve the Lovart AK/SK UI,
+        // wire shape, and lovart-credentials-v1.json compatibility path.
         onState,
         validate: async (credentials) => {
           const verdict = await validate(credentials);
@@ -111,7 +115,7 @@ export function createCredentialService({
 
   async function clear() {
     if (!((platform === "darwin" || platform === "win32") && (arch === "arm64" || arch === "x64"))) return unsupported();
-    try { return publicResult(await helperClient.clear(), now); }
+    try { return publicResult(await helperClient.clear(), now); } // Legacy profile only.
     catch (error) {
       const code = publicCode(error?.code, "CREDENTIAL_STORE_DENIED");
       return { status: "setup_required", code, message: messageFor(code) };

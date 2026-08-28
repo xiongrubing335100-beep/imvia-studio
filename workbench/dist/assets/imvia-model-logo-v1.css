@@ -1,0 +1,70 @@
+.model-icon[data-imvia-model-logo] {
+  overflow: hidden;
+  padding: 4px;
+  color: transparent !important;
+  font-size: 0 !important;
+  background-color: transparent;
+  background-image: var(--imvia-model-logo);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
+}
+
+.model-icon[data-imvia-model-logo] > * {
+  visibility: hidden !important;
+}
+
+.model-icon.imvia-provider-seed {
+  padding: 3px;
+  background-color: transparent;
+}
+
+.model-icon.imvia-provider-minimax {
+  padding: 0;
+  background-color: transparent;
+}
+
+.model-icon.imvia-provider-kling {
+  padding: 2px;
+  background-color: transparent;
+}
+
+.model-icon.imvia-provider-openai {
+  padding: 5px;
+  background-color: transparent;
+}
+
+.model-icon.imvia-provider-gemini {
+  padding: 4px;
+  background-color: transparent;
+}
+
+.model-icon.imvia-provider-midjourney {
+  padding: 3px;
+  background-color: transparent;
+}
+
+/* Keep the full model names readable and remove the extra icon tiles. */
+.model-section .dropdown-menu {
+  width: max(100%, 320px);
+  right: auto;
+  max-height: 340px;
+}
+
+.model-section .dropdown-menu button > .dropdown-option-content > span,
+.model-section .select-box > span:first-child {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.model-section .model-icon,
+.model-section .model-icon[data-imvia-model-logo],
+.model-section .model-icon.imvia-provider-seed,
+.model-section .model-icon.imvia-provider-minimax,
+.model-section .model-icon.imvia-provider-kling,
+.model-section .model-icon.imvia-provider-openai,
+.model-section .model-icon.imvia-provider-gemini,
+.model-section .model-icon.imvia-provider-midjourney {
+  background-color: transparent !important;
+}
